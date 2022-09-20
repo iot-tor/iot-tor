@@ -1,10 +1,10 @@
-# Tor in ESP32
+# Tor on ESP32
 
-This project is a lightweigth Tor working on a ESP32 (or other mcu). The goal in not to have a perfect anonymity, but to have something lightweight working on a mcu with the ability to connect to a remote MCU (a mcu conneted to internet, but without non-local IP address or port forwarding...), but without using an external server or proprietary/closed-source/priced solutions. 
+This project is a lightweigth Tor working on a ESP32 (or other mcu). The goal in not to have a perfect anonymity, but to have something lightweight working on a mcu with the ability to connect to a remote MCU (a mcu conneted to internet, without non-local IP address or port forwarding...), but without using an external server or proprietary/closed-source/priced solutions. 
 
 The code is still in developpement (but it kind of works).
 
-Warning: considere it as no secure, since it is experimental, and does not respect all the rules of Tor anonymity.
+Warning: consider it as no secure, since it is experimental, and does not respect all the "rules" of Tor
 
 There is already https://github.com/briand-hub/toresp32 which to a tor proxy on a ESP32.  I started with the code of toresp32, and I rewrited some parts. I wanted a more lightweight and more portable thing. Moreover, I wanted to have the "rendez-vous" system for the "connet to remote" goal.
 
@@ -44,13 +44,13 @@ This code is open source and protected by GPL v3 license. This project is intend
 - For now, it only use IPV4, but ipv6 is not too dificult to add.
 - I plan to add a very lightweight "rendevous protocol" to easily connect to a remote mcu without an external server, and whithout using V3 HS desciptors and time periods... Of course, the MCU and the client must to be trusted by the same party.
 
-### Current status on ESP32
+### Current status
 
-For the ESP32, it works "more or less", but there are still some problems:
+It works "more or less", but there are still some problems:
 
-- Something fails with the SPIFFS (used to store descriptors), and this is still mysterious for me. Sometimes, the SPIFFS says that the filesystem is full (but it seems that it is not). I use fopen (...,"r+") to modify the descriptors cache files, maybe the spiffs don't like this.
+- On ESP32, something fails with the SPIFFS (used to store descriptors), and this is still mysterious for me. Sometimes, the SPIFFS says that the filesystem is full (but it seems that it is not). I use fopen (...,"r+") to modify the descriptors cache files, maybe the spiffs don't like this.
 
-- Still have some memory issues. In a previous version, I used too many threads, and sometimes pthread_create failed due to lack of memory for the new stack (and it seems that the ESP32 does not want to use the PSRAM for a stack). I currently rewrote some part to use less threads and more poll(). But there are still memory issues, and race conditions, and the rewriting is not yet finished...
+- On ESP32, may have some memory issues (the free memory decrease over the time). 
 
 ## Usage :
 
@@ -64,7 +64,7 @@ If you want to make your own "hidden server", the easyest way is to modify "shit
 
 There are two "modes":
 
-- the "low memory mode": it keeps only 64 relays of each type (guard, middle, exit)
+- the "low memory mode": it keeps only 64 relays of each type (guard, middle, exit). 
 - the "standard memory": if keeps all relays nodes. it takes much more memory, and need PSRAM (ESP-wroover for example). Note that you also need (at least) the 8mb flash version. Important info of nodes (ip, fp, id25519, ntor, flags) are stored in the table cache_descs[]. One use the fingerprint (fp) to know where to store the "descriptor". One try the position 'fp[0:1]', and if it is already used, we try fp[1:2]... and so one up to fp[18:19]. Note that if cache_descs[] have size approx two times the number of nodes in the consensus (and we suppose that each fp is "as random"), each try has 50% chances to succed, so this method will fail with probability 2^(-19), which is good for our usage.
 
 To change the mode, look at the file "defines.hpp"

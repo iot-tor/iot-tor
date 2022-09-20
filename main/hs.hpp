@@ -5,16 +5,17 @@
 #include <assert.h>
 #include <time.h>
 #include <string>
+#include <algorithm>
 #include <string.h>
 #include <mbedtls/bignum.h>
 #include <mbedtls/sha512.h>
 
 using namespace std;
 
-#if 1 //DEBUG
+#ifdef ESP
 
 #define NB_RAD 2
-#define NB_FDIR 3
+#define NB_FDIR 4
 #define NB_OLD 2
 #define NB_INTRO 2
 
@@ -26,6 +27,13 @@ using namespace std;
 #define NB_INTRO 3
 #endif
 
+#ifdef ESP
+int max_pub=1;
+int max_pub_circuits=4;
+#else
+int max_pub=2;
+int max_pub_circuits=10;
+#endif
 
 
 /** Ed25519 Basepoint value. Taken from section 5 of
@@ -41,7 +49,7 @@ void comp_subcred(unsigned char *subcred,const unsigned char *public_key,const u
   unsigned char cred[32];
   /*
     The subcredential for a period is derived as:
-	
+x	
     subcredential = H("subcredential" | credential | blinded-public-key).
 	
     In the above formula, credential corresponds to:
@@ -215,23 +223,6 @@ struct s_hsmac_t : public s_t, public hsmac_t {
   }
 };
 
-struct s_s_t : public s_t {
-  socket_t *sock=NULL;
-  bool fail=0;
-  s_s_t(socket_t &s):s_t() {
-    sock=&s;
-  }
-  void push(const unsigned char *in,int inlen) {
-    if(fail) return;
-    int r=sock->write(in,inlen);
-    if(r!=inlen)
-      fail=1;
-  }
-  void finish() {
-  }
-};
-
-
 struct blinded_public_onion_key {
   unsigned char public_key[32];
   unsigned char blinded_public_key[32];
@@ -247,61 +238,13 @@ struct blinded_public_onion_key {
     comp_cred();
   }
 
-};
-
-struct keeper4_t {
-  int s=0;
-  int bb[4];
-  unsigned char ids[4][33];
-  unsigned char tgt[33];
-  void init(unsigned char *a) {
-    tgt[0]=0;
-    memcpy(tgt+1,a,32);
-    s=0;
-    memset(bb,0,sizeof(bb));
-    //print("tgt",tgt,33);
-  }
-  void insert(int i,const unsigned char *a,int pos) {
-    if(pos==4) return;
-    //print("tgt ",tgt,33);
-    //for(int i=0;i<s;i++)      print("    ",ids[i],33);
-    if(pos<3) {
-      memmove(ids+pos+1,ids+pos,sizeof(ids[0])*(3-pos));
-      memmove(bb+pos+1,bb+pos,sizeof(bb[0])*(3-pos));
-    }
-    bb[pos]=i;
-    memcpy(ids[pos],a,33);
-    s++;
-    //print(">>t ",tgt,33);
-    //for(int i=0;i<s;i++)      print("    ",ids[i],33);
-    if(s==5) s=4;
-  }
-  void add(int i,const unsigned char *id) {
-    unsigned char a[33];
-    a[0]=0;
-    memcpy(a+1,id,32);
-    if(memcmp(a,tgt,33)<0)
-      a[0]=1;
-    assert(memcmp(a,tgt,33)>=0);
-    int u=s-1;
-    for(u=s-1;u>=0;u--) {
-      if(memcmp(a,ids[u],33)>=0) {
-	break;
-      }
-    }
-    //printf("add %d at %d ",i,u+1);
-    //print("",a,33);
-    insert(i,a,u+1);
+  blinded_public_onion_key() {
+    memset(public_key,0,32);
+    memset(blinded_public_key,0,32);
+    memset(subcred,0,32);
+    tp=0;
   }
 
-  void print() const {
-    ::print("keeper for ",tgt,33);
-    for(int i=0;i<s;i++) {
-      printf("%d : id= %d ",i,bb[i]);
-      ::print("",ids[i],33);
-      cache_descs[bb[i]].print_info();
-    }
-  }
 };
 
 struct hsdirs_t :public blinded_public_onion_key {
@@ -357,7 +300,7 @@ hsdirs_t gen_hsdirs(unsigned char *pub,int tp2)
 {
   hsdirs_t r;
 
-  LOG_INFO("gen_hsdir tp=%d \n",tp2);
+  LOG_INFO("(re)gen_hsdir tp=%d \n",tp2);
     
   r.tp=tp2; 
   memcpy(r.public_key,pub,32);
@@ -375,7 +318,7 @@ hsdirs_t gen_hsdirs(unsigned char *pub,int tp2)
   //   print("hsidx[0]: ",r.hsidx[0],32);
   // if(hsdir_dbg>2)
   //   print("hsidx[1]: ",r.hsidx[1],32);
-  keeper4_t k[2];
+  keeper_t<int,32,4> k[2];
   k[0].init(r.hsidx[0]);
   k[1].init(r.hsidx[1]);
 
@@ -390,7 +333,7 @@ hsdirs_t gen_hsdirs(unsigned char *pub,int tp2)
   } else
     memcpy(srv,srvc,32);
 
-  LOG_INFO("srv: %s\n",to_str(srv,32).c_str());
+  LOG_DEBUG("srv: %s\n",to_str(srv,32).c_str());
   
   auto m=info_node_t::FL_CONS|info_node_t::FL_HSDIR;
   for(int i=0;i<CACHE_SIZE;i++)
@@ -513,7 +456,7 @@ struct derived_onion_key_t : public onion_key_t {
 
 };
 
-
+struct circuits_intros_t;
 
 struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
   unsigned char descriptor_signing_key[32];
@@ -526,14 +469,29 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
   unsigned char iv2[16];
   unsigned char mackey2[32];
 
+  circuits_intros_t *intros=NULL;
+  
   mbedtls_cipher_context_t cipher1_ctx;
   mbedtls_cipher_context_t cipher2_ctx;
 
-  bool mark_dead=0;
-
+  struct pub_info_t {
+    long long when=0;
+    int interval=20;
+    void fail() {
+      when=get_unix_time()+interval;
+      interval*=2;
+      if(interval>TOR_HSDIR_REPUBLISH_TIME_WHEN_FAILS)
+	interval=TOR_HSDIR_REPUBLISH_TIME_WHEN_FAILS;
+    }
+    void success() {
+      when=get_unix_time()+TOR_HSDIR_REPUBLISH_TIME;
+      interval=20;
+    }
+  };
+  
   vector<circuit_t*> tci;
   vector<intro_keys_t*> intros_keypairs;
-  map<int,long long> mpublished;
+  map<int,pub_info_t> mpublished;
   vector<unsigned short> ids; 
 
   void print() const {
@@ -546,15 +504,14 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
 	  s.push_back('/');
 	else
 	  s.push_back('k');
-      }
-      else {
+      } else {
 	if(intros_keypairs[i]==NULL) 
 	  s.push_back('?');
 	else
 	  s.push_back('O');
       }
     }
-    LOG_INFO("hsdesc_t tp=%d intros:'%s' \n",tp,s.c_str());
+    LOG_INFO("hsdesc_t tp=%d intros:'%s' \n",int(tp),s.c_str());
   }
   
   void clear() {
@@ -571,7 +528,6 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
     intros_keypairs.clear();
     tci.clear();
 
-    mark_dead=0;
     memset(descriptor_signing_key,0,32);
     memset(salt1,0,16);
     memset(salt2,0,16);
@@ -587,8 +543,10 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
   }
 
   ~hsdesc_t() {
-    //printf("~hsdesc_t() %p\n",this);
     clear();
+
+    if(ch)
+      delete ch;
   }
 
   void kdf1() {
@@ -847,9 +805,10 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
 	cc.printf("create2-formats 2\n");
 	//flow-control 1-2 31
 
-	for(auto &it:h.intros_keypairs) {
+	for(int k=0;k<h.intros_keypairs.size();k++) {
+	  auto &it(h.intros_keypairs[k]);
 	  if(it==NULL) {
-	    LOG_WARN("intros_keypair is NULL ! \n");
+	    LOG_WARN("intros_keypair %d is NULL !\n",k);
 	    continue;
 	  }
 	  auto ls=it->node.gen_link_specifier();
@@ -933,7 +892,6 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
     }
   };
 
-
   
   
   bool gen_hs_descr_(s_t &a,onion_key_t &site) {
@@ -959,29 +917,46 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
 
   circuits_hsdirs_t *ch=NULL;
 
-  void publish_hsdirs(onion_key_t &site,bool recomp=0) {
-    LOG_INFO("=== publish ===== tp=%d\n",int(tp));
+  bool is_publishing() {
+    if(ch) {
+      LOG_INFOV("still publishing...\n");
+      if(ch->is_working()==false) {
+	string str="";
+	for(int i=0;i<ch->circuits.size();i++) {
+	  char tmp[50];
+	  if(ch->circuits[i]->status==circuits_t::OK_JOB) {
+	    mpublished[ch->circuits[i]->orig].success();
+	    snprintf(tmp,50,"%d %s OK /",ch->circuits[i]->orig,shortname(ch->circuits[i]->orig).c_str());
+	  } else {
+	    mpublished[ch->circuits[i]->orig].fail();
+	    snprintf(tmp,50,"%d %s FAIL %s /",ch->circuits[i]->orig,shortname(ch->circuits[i]->orig).c_str(),ch->status_str(circuits_t::status_t(ch->circuits[i]->status)));
+	  }
+	  str+=string(tmp);
+	}
+	LOG_INFO("end publisher %d : %s\n",int(tp),str.c_str());
+	delete ch;
+	ch=NULL;
+	LOG_DEBUG("circuits_hsdir_t deleted \n");
+	return 0;
+      }
+
+      return 1;
+    }
+
+    return 0;
+  }
+  
+  bool recomp=0;
+
+  bool publish_hsdirs(poller_t &poller,onion_key_t &site) {
+    LOG_INFOV("=== publish ===== tp=%d\n",int(tp));
     unsigned char *pub=public_key;
     
     if(ids.empty() || recomp) {
       auto hsdirs=gen_hsdirs(pub,tp);
       ids=hsdirs.ids;
+      recomp=0;
     }
-
-    if(ch) {
-      LOG_INFO("still publishing...\n");
-      if(ch->is_working()==false) {
-	LOG_INFO("done: delete publisher...\n");
-	for(auto &it:ch->okid) {
-	  mpublished[it]=get_unix_time();
-	}
-	delete ch;
-	ch=NULL;
-      }
-
-      return;
-    }
-
 
     bool has_intro=0;
     for(auto &it:intros_keypairs) {
@@ -991,36 +966,59 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
     
     if(!has_intro) {
       LOG_WARN("no introduction points: no publish...\n");
-      return;
+      return 0;
     }
 
     vector<unsigned short> todo;
     for(auto &ii:ids) {
       auto it=mpublished.find(ii);
-      if(it!=mpublished.end() && get_unix_time()-it->second<TOR_HSDIR_REPUBLISH_TIME)
-	continue;
-      LOG_INFO("republish tp=%d id=%d\n",tp,ii);
+      if(it!=mpublished.end()) {
+	if(get_unix_time()<it->second.when)
+	  continue;
+      }
+      LOG_INFOV("republish tp=%d id=%d\n",int(tp),ii);
       todo.push_back(ii);
     }
 
     if(todo.empty()) {
-      LOG_INFO("nothing to republish...\n");
-      return;
+      LOG_INFOV("nothing to republish...\n");
+      return 0;
     }
 
-    ch=new circuits_hsdirs_t(todo,tp);
+    if(todo.size()>max_pub_circuits) {
+      random_shuffle(todo.begin(),todo.end());
+      todo.resize(max_pub_circuits);
+    }
+
+    if(main_dbg>=_LOG_INFO) {
+      string r;
+      for(auto &it:todo) {
+	char tmp[20];
+	snprintf(tmp,19,"%d %s / ",it,shortname(it).c_str());
+	r+=string(tmp);
+      }
+      LOG_INFO("(re)publish tp=%d ids=%s\n",int(tp),r.c_str());
+    }
+    
+    ch=new circuits_hsdirs_t(poller,todo,tp);
+    ch->dbg=_LOG_SEVERE;
+    ch->dbg_sub=_LOG_SEVERE;
+#ifdef DBGPOLL
+    char tmp[100];
+    snprintf(tmp,99,"hsdirs %d",int(tp));
+    ch->name=tmp;
+#endif
 
     int r=gen_hs_descr(site,ch->a,ch->v);
     assert(r==DESCR_OK);
     
     ch->publish();
-    
-    LOG_SEVERE("TODO publish ... \n");
 
+    return 1;
   }
 
   bool gen_new_keypair(int u,circuit_t *tc) {
-    LOG_DEBUG("gen keypair tp=%Ld tc=%p id=%d\n",tp,tc,u);
+    LOG_DEBUG("gen keypair tp=%Ld tc=%p id=%d\n",int(tp),tc,u);
     intro_keys_t *ik=new intro_keys_t;
     ik->generate();
     info_node_t n(*tc->get_exit_node());
@@ -1032,7 +1030,7 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
   }
   
   bool establish_intro(int u,circuit_t *tc) {
-    LOG_DEBUG("establish_intro tp=%Ld tc=%p id=%d\n",tp,tc,u);
+    LOG_DEBUG("establish_intro tp=%Ld tc=%p id=%d\n",int(tp),tc,u);
     assert(intros_keypairs[u]);
     tc->establish_intro(*(intros_keypairs[u]));
     tci[u]=tc;
@@ -1040,7 +1038,7 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
   }
 
   void kill_intro(int u) {
-    LOG_DEBUG("kill intro tp=%Ld %d\n",tp,u);
+    LOG_DEBUG("kill intro tp=%Ld %d\n",int(tp),u);
     if(intros_keypairs[u]) {
       delete intros_keypairs[u];
       intros_keypairs[u]=NULL;
@@ -1052,7 +1050,7 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
   }  
 
   void set_intro_point(int i,circuit_t *tc) {
-    LOG_DEBUG("set_intro_point id=%d tc=%p\n",i,tc);
+    LOG_INFO("set_intro_point id=%d tc=%p\n",i,tc);
     if(tc) {
       if(tc->build_status!=circuit_t::BS_BUILT) {
 	LOG_FATAL("tc->build_status=%d\n",tc->build_status);
@@ -1072,7 +1070,6 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
     
     if(tc==NULL) return; //deregister
 
-
     if(intros_keypairs[i]==NULL) {
       gen_new_keypair(i,tc);    
     }
@@ -1084,19 +1081,51 @@ struct hsdesc_t : public blinded_public_onion_key { //crypto things of hsdescs
 };
 
 struct circuits_intros_t : public circuits_t {
+#ifdef MEMDBGSUB
+  void * operator new(size_t size)
+  {
+    void * p = malloc(size);//MEMDBG
+    printf("*** new circuits_intro_t %p size=%d\n",p,int(size));
+    return p;
+  }
+    
+  void operator delete(void * p)
+  {
+    printf("*** delete circuits_intro_t %p \n",p);
+    free(p);
+  }
+#endif
   hsdesc_t *hd=NULL;
-  map<int,int> mf;
 
+  virtual void pcallback(pollable_t **chain,poll_reg_t &fds) {
+    circuits_t::pcallback(chain,fds);
+    
+    if(postdo&2) {
+      postdo&=~2;
+      LOG_INFOV("postdo something... (circuits_intro_t)\n");
+      for(auto &cs:circuits) {
+	if(cs->tc && cs->tc->intro_ok &&cs->status==OK_CONNECTED) {
+	  cs->status=OK_JOB;
+	  LOG_INFO("job OK : intro_ok\n");
+	}
+	if(cs->tc && cs->tc->has_intro2() ) {
+	  LOG_INFOV("TODO proc intro2 here\n");
+	}
+      }
+    }
+  }
+
+  
   virtual ~circuits_intros_t() {
-
+    LOG_DEBUG("~circuits_intros_t %p\n",this);
   }
 
   virtual void done(int i,int ok) {
-    LOG_INFO("circuits to intros done id=%d ok=%d\n",i,ok);
+    LOG_INFO("circuits_intros done %p tc=%p id=%d ok=%d\n",circuits[i],circuits[i]->tc,i,ok);
     circuits[i]->cbs=ok;
 
-    if(ok==FAIL_CONNECTED_EARLY || ok==FAIL_CONNECTED) {
-      mf[i]++;
+    if(ok==FAIL_CONNECTED || ok==FAIL_JOB) {
+      circuits[i]->fails++;
       hd->set_intro_point(i,NULL);
       return;
     }
@@ -1106,19 +1135,17 @@ struct circuits_intros_t : public circuits_t {
     }
     
     if(ok==OK_CONNECTED) {
-      mf[i]=0;
+      circuits[i]->fails=0;
       hd->set_intro_point(i,circuits[i]->tc);
       return;
     }
     
-    LOG_SEVERE("TODO (?)\n");
+    LOG_SEVERE("TODO done ok=%d\n",ok);
   }
   
-  circuits_intros_t(hsdesc_t *h,int tp) {
+  circuits_intros_t(poller_t &poller,hsdesc_t *h,int tp):circuits_t(poller) {
     hd=h;
-    char tmp[100];
-    snprintf(tmp,100,"intros tp=%d",tp);
-    name=tmp;
+    intro=1;
   }
 
   void establish_intros(int n) {
@@ -1128,17 +1155,17 @@ struct circuits_intros_t : public circuits_t {
   }
 
   void check() {
-    LOG_INFOVV("check all intro points\n");
+    LOG_INFOV("check all intro points\n");
     for(int i=0;i<circuits.size();i++) {
       assert(circuits[i]);
       auto cbs=circuits[i]->cbs;
       auto tc=circuits[i]->tc;
-      if(circuits[i]->status==WAIT) {
-	LOG_INFO("check id=%d : still working...\n",i);
+      if(circuits[i]->status==WAIT || circuits[i]->status==FAIL_CONNECTED_RETRY) {
+	LOG_INFOV("check id=%d : still working...\n",i);
 	continue;
       }
-      if(tc==NULL || cbs==FAIL_CONNECTED_EARLY || cbs==FAIL_CONNECTED||cbs==DESTROYED) {
-	LOG_INFO("reconstruct circuit id=%d prev=%p cbs=%d status=%d\n",i,tc,cbs,circuits[i]->status);
+      if(tc==NULL || cbs==FAIL_CONNECTED || cbs==DESTROYED || tc->check_alive()==false) {
+	LOG_INFO("reconstruct circuit id=%d %p prevtc=%p cbs=%d status=%d\n",i,circuits[i],tc,cbs,circuits[i]->status);
 	hd->set_intro_point(i,NULL);
 	relay_t *ex=NULL;
 	if(tc) {
@@ -1146,9 +1173,9 @@ struct circuits_intros_t : public circuits_t {
 	  circuits[i]->tc=NULL;
 	  clean_delete_circuit(tc);
 	}
-	if(mf[i]>=4) { //change exit point...
+	if(circuits[i]->fails>=4) { //change exit point...
 	  ex=NULL;
-	  mf[i]=0;
+	  circuits[i]->fails=0;
 	}
 	if(ex==NULL) hd->kill_intro(i);
 	async_gen_working_circuit(i,ex);
@@ -1157,21 +1184,25 @@ struct circuits_intros_t : public circuits_t {
   }
 };
 
+bool no_hs_publish=0; //debug option
 
 
-struct hs_server_t {
+struct hs_server_t : public union_poller_t {
+
   map<int,hsdesc_t*> hd;
-  map<int,circuits_intros_t*> mintros;
 
   onion_key_t site;
   unsigned char pub[32];
   mutex_t mut_th;
-  int nthu=0;
-  int nth=4;
   
   void print2() {
-    for(auto &it:hd)
-      it.second->print();
+    for(auto &it:hd) {
+      if(it.second==NULL)
+	LOG_WARN("%d it.second=NULL\n",it.first);
+      else {
+	it.second->print();
+      }
+    }
   }
   
   void print(bool force=0) {
@@ -1185,23 +1216,18 @@ struct hs_server_t {
       }
     }
     
-    static int ot=0,ol=0;
-    int t=0;
+    static int ol=0;
     mut_th.lock();
-    t=nthu;
     mut_th.unlock();
-    if(ot!=t || l!=ol || force)
-      LOG_INFO("%d connections to intro points, %d connections to HS\n",l,t);
-    //else printf(".\n");
-    ot=t;
+    if(l!=ol || force)
+      LOG_INFO("%d connections to intro points\n",l);
     ol=l;
-    //site.print_info();
-
   }
   
-  hsdesc_t *get_hd(int tp) {
+  hsdesc_t *get_hd(int tp,bool create=1) {
     hsdesc_t *h=NULL;
     if(hd.find(tp)==hd.end()) {
+      if(!create) return NULL;
       h=new hsdesc_t();
       hd[tp]=h;
     } else
@@ -1209,38 +1235,71 @@ struct hs_server_t {
     return h;
   }
 
-  hs_server_t(int nth_=4) {
-    nth=nth_;
+  hs_server_t(const string &path="") {
+    init(path);
+
+    poller=&main_poller;
+    poll_reg_t r;
+    r.events=POLL_TIMEOUT;
+    r.timeout=500; //500 ms
+#ifdef DBGPOLL
+    r.name="hs";
+#endif
+    union_poller_t::pollable_t::reg(r);
   }
 
+  void delete_hd(int tp) {
+    auto p=hd.at(tp);
+    LOG_INFO("delete_hd(tp=%d) p=%p\n",int(tp),p);
+    assert(p);
+
+    auto ci=p->intros;
+    LOG_INFOV("delete hsdesc tp=%d circuits_intros %p :\n",int(tp),p,ci);
+    assert(ci);
+    ci->destroy_all();
+    delete ci;
+    
+    LOG_INFOV("delete hsdesc_t tp=%d %p :\n",int(tp),p);
+    delete p;
+  }
+  
   void remove_old_hd() {
-    map<int,hsdesc_t*> nhd;
-    for(auto &it:hd)
-      if(it.second->mark_dead) { 
-	LOG_INFO("delete hsdesc tp=%d\n",int(it.second->tp));
-	for(auto &jt:it.second->tci) {
-	  delete jt;
-	}
-	auto ci=mintros.at(it.first);
-	assert(ci);
-	ci->destroy_all();
-	delete ci;
+    int dt=-1;
+    if(relays.srv_period_f>=0.5)
+      dt=0;
+    
+    int stp=get_cons_time_period()+dt;
 
-	delete it.second;
+    LOG_INFO("remove old hd stp=%d\n",stp);
+
+    for(auto &it:hd) {
+      LOG_INFO(" hds tp=%d\n",it.first);
+    }
+    
+    for(auto &it:hd) {
+      if(it.first<stp) {
+	delete_hd(it.first);
+	hd.erase(it.first);
+	remove_old_hd();
+	return;
       }
-      else
-	nhd[it.first]=it.second;
-    hd.swap(nhd);
+    }
   }
 
+  void remove_all_hd() {
+    LOG_INFOVV("remove_all_hd()\n");
+    for(auto &it:hd)
+      delete_hd(it.first);
+    hd.clear();
+  }
 
   void create_hsdescs(int tp) {
     if(hd.find(tp)!=hd.end()) {
-      LOG_INFO("intros already ok for tp=%d\n",tp);
+      LOG_INFOV("intros already ok for tp=%d\n",int(tp));
       return;
     }
     
-    LOG_INFO("== establish intros tp=%d ==\n",tp);
+    LOG_INFO("== establish intros tp=%d ==\n",int(tp));
     
     hsdesc_t &hh(*get_hd(tp));
     memcpy(hh.public_key,site.public_key,32);
@@ -1250,8 +1309,16 @@ struct hs_server_t {
     hh.intros_keypairs.resize(NB_INTRO,NULL);
     hh.tci.resize(NB_INTRO,NULL);
 
-    auto ci=new circuits_intros_t(&hh,tp);
-    mintros[tp]=ci;
+    auto ci=new circuits_intros_t(*this,&hh,tp);
+    ci->dbg=DBGBASE;
+    ci->dbg_sub=_LOG_SEVERE;
+    
+#ifdef DBGPOLL
+    char tmp[100];
+    snprintf(tmp,99,"intros %d",int(tp));
+    ci->name=tmp;
+#endif
+    hh.intros=ci;
     ci->establish_intros(NB_INTRO);
 
     //for(int i=0;i<NB_INTRO;i++)
@@ -1264,155 +1331,235 @@ struct hs_server_t {
       dt=0;
     
     int stp=get_cons_time_period()+dt;
-    for(auto &it:hd)
-      if(it.first<stp)
-	it.second->mark_dead=1;
-    
-    for(int no=0;no<NB_OLD;no++) {
-      int tp=get_cons_time_period()+dt+no;
 
-      create_hsdescs(tp);
-    }
+    for(int no=0;no<NB_OLD;no++)
+      create_hsdescs(stp+no);
   }
 
-  bool recomp=0;
+  char sw=0;
+  short old_nb_refresh=0;
   
-  void publish(bool recomp_=0) {
-    if(recomp_) recomp=1;
+  void publish() {
+    LOG_INFOV("publish\n");
+
+    bool recomp_=0;
+    if(old_nb_refresh!=tor_nb_refresh()){
+      recomp_=1;
+      old_nb_refresh=tor_nb_refresh();
+    }
+    
     int dt=-1; //-1 0
     if(relays.srv_period_f>=0.5)
       dt=0; //0 1
     
     //comp_all_hsdir_index(dt);
 
+    int np=0;
     for(int no=0;no<NB_OLD;no++) {
-      //if(no==0) continue;
-      // at 10h morning, with no==0, it's ok
-      // at 18h , with no==1, it's ok
-      // in all cases, ok when no+dt==0
+      int tp=get_cons_time_period()+dt+no;
+
+      auto hh=get_hd(tp,0);
+      if(!hh) {
+	LOG_INFOV("no (yet) hd for %d\n",int(tp));
+	continue;
+      }
+      if(recomp_) hh->recomp=1;
+      assert(hh->tp==tp);
+      assert(match(pub,hh->public_key,32));
+
+      if(hh->is_publishing()) np++;
+    }
+
+    if(np>=max_pub) return;
+
+    int osw=sw;
+    for(int no_=0;no_<NB_OLD;no_++) {
+      int no=no_^osw;
       
       int tp=get_cons_time_period()+dt+no;
 
-      hsdesc_t &hh(*get_hd(tp));
-      assert(hh.tp==tp);
-      assert(match(pub,hh.public_key,32));
-
-
-      auto ci=mintros.at(tp);
-      assert(ci);
-      if(ci->is_working()) {
-	LOG_INFO("do not publish intros for tp=%d since circuits is still working\n",tp);
-      } else {
-	hh.publish_hsdirs(site,recomp);
-	recomp=0;
-      }
-    }
-    LOG_INFO("publish done\n");
-  }
-
-  struct th_t {
-    hs_server_t *o;
-    intro_material_t *t;
-    pthread_t thid;
-  };
-  
-  bool proc_rdv(circuit_t *tc2) {
-    while(tc2->check_alive()) {
-      auto r=tc2->listen(10000);
-      if(r==NULL) {
-	LOG_DEBUG("listen returns NULL (timemout): disconnect\n");
-	break;
-      }
-      assert(r);
-      LOG_INFO("listen returns port=%d\n",r->port);
-      if(r->port!=80) {
-	LOG_INFO("reject (!=80)\n");
-	tc2->reject();
+      auto hh=get_hd(tp,0);
+      if(!hh)
+	continue;
+      assert(hh->tp==tp);
+      assert(match(pub,hh->public_key,32));
+      if(hh->is_publishing()) {
 	continue;
       }
-      socket_tor_t sr(tc2);
-      sr.accept();
+      
+      auto ci=hh->intros;
+      assert(ci);
+      if(ci->is_working()) {
+	LOG_INFOV("do not publish intros for tp=%d since circuits is still working\n",int(tp));
+      } else {
+	int r=hh->publish_hsdirs(*this,site);
+	if(r) np++;
+	sw=sw^1;
+      }
+      if(np>=max_pub) break;
+    }
+    LOG_INFOV("publish done\n");
+  }
 
-      static int k=0;
-      char tmp[150];
-#ifdef ESP
-      int s=esp_timer_get_time() / 1000ULL/ 1000ULL;
-      snprintf(tmp,150,"<html><body><p>HELLO WORLD from ESP32 cnt=%d </p> <p>uptime : %d secs = %lf hours</p></body></html>\r\n",k++,s,s/3600.);
-#else
-      snprintf(tmp,150,"<html><body>HELLO WORLD from LINUX cnt=%d </body></html>\r\n",k++);
+  struct server_t {
+    hs_server_t *o;
+    intro_material_t *t;
+    circuit_t *tc=NULL;
+    poller_t *poller;
+    int tries=0;
+
+    void destroy_tc() {
+      LOG_INFOV("server_t %p destroy_tc tc=%p\n",this,tc);
+      for(auto &it:ss)
+	delete it;
+      ss.clear();
+      if(tc)
+	clean_delete_circuit(tc);
+      tc=NULL;
+    }
+
+    bool check_alive() {
+      if(!tc) return false;
+      if(!tc->check_alive()) return false;
+      return true;
+    }
+    
+    ~server_t() {
+      LOG_DEBUG("~server_t %p\n",this);
+      if(t)
+	delete t;
+      t=NULL;
+      destroy_tc();
+    }
+    
+    bool gen() {
+      tries++;
+      if(tries>10) {
+	LOG_WARN("too may tries...\n");
+	return 0;
+      }
+
+      tc=new circuit_t(*poller);
+#ifdef DBGPOLL
+      tc->name="rdv circ";
 #endif
-      LOG_INFO("shitty_http_server... \n");
-      shitty_http_server(sr,tmp);
-      LOG_INFO("shitty_http_server returns\n");
+      
+      int r=fill_nodes(tc,&(t->node));
+      if(!r) {
+	LOG_WARN("fill_nodes fails...\n");
+	delete tc;
+	tc=NULL;
+	return 0;
+      }
+      //tc->print_circuit_info();
+      
+      tc->set_ncb(std::bind(&server_t::cb,this,std::placeholders::_1));
+      
+      r=tc->async_build_circuit();
+      if(r==0) {
+	LOG_WARN("async_build_circuit FAIL\n");
+	clean_delete_circuit(tc);
+	tc=NULL;
+      }
+      return 1;
     }
-    LOG_INFO("disconnect/ed\n");
-    delete tc2;
-    return true;
 
-  }
-  bool proc_intro2_connect_(intro_material_t *t)
-  {
-    circuit_t *tc2=gen_working_circuit(&(t->node),20,7);
-    if(!tc2) {
-      LOG_WARN("proc_intro2_connect_ : no circuit working ! exiting \n");
-      delete t;
-      return false;
+    list<shitty_http_server_t*> ss;
+    
+    void init(hs_server_t *h,intro_material_t *i,poller_t *p) {
+      o=h;
+      t=i;
+      poller=p;
+
+      gen();
     }
-    LOG_INFO("== connect_rendezvous  ==\n");
-    tc2->connect_rendezvous(t);
-    LOG_INFO("connect_rendezvous done\n");
-    delete t;
-    proc_rdv(tc2);
-    LOG_INFO("proc_rdv finished\n");
-    return 1;
-  }
 
-  static void *proc_intro2_connect_th(void *tt_)
-  {
-    th_t *tt=(th_t*)tt_;
-    tt->o->proc_intro2_connect_(tt->t);
-    tt->o->mut_th.lock();
-    tt->o->nthu--;
-    tt->o->mut_th.unlock();
-    LOG_INFO("end thread...\n");
-    delete tt;
-    return NULL;
-  }
+    int finished=0;
+    
+    int k=0;
+
+    void cb(ccb_t cb) {
+      LOG_INFOV("cb %d\n",cb);
+      
+      if(cb==CCB_CIRCUIT_BUILT_FAIL) {
+	destroy_tc();
+	if(!gen()) {
+	  finished=1;
+	}
+      } else if(cb==CCB_CIRCUIT_BUILT_OK) {
+	LOG_INFOV("circuit to rdv node built, now connect_rendezvous...\n");
+	tc->connect_rendezvous(t);
+	LOG_INFOV("connect_rendezvous done\n");
+	delete t;
+	t=NULL;
+      } else if(cb==CCB_DESTROY) {
+	finished=1;
+	destroy_tc();
+      } else if(cb==CCB_RELAY_BEGIN) {
+	LOG_INFO("CCB_RELAY_BEGIN, launch HTTP server !\n");
+	
+	string bod="<html><body>";
+	bod+="<p>HELLO WORLD</p>";
+
+	{
+	  static int kk=0;
+	  char tmp[150];
+	  int s=timer_get_ms()/1000;
+	  snprintf(tmp,150,"<p>#req=%d (%d)</p> <p>uptime : %d secs = %lf hours</p>",kk++,k++,s,s/3600.);
+	  bod+=tmp;
+	}
+#ifdef ESP
+	bod+="<p>";
+	bod+=esp_heap_info("<br />");
+	bod+="</p>";
+#endif	
+	
+	bod+="</body></html>\r\n";
+	
+	
+	auto sr=new asocket_tor_t(tc);
+	if(!sr->accept()) {
+	  LOG_WARN("problem with accept()\n");
+	  delete sr;
+	} else {
+	  LOG_INFOV("new shitty_http_server... \n");
+	  auto r=shitty_http_server(sr,bod);
+	  ss.push_back(r);
+	  LOG_INFOV("new shitty_http_server returns\n");
+	}
+	
+      } else {
+	LOG_INFO("handle cb %d ?\n",cb);
+      }
+    }
+  };
+
+  list<server_t*> ls;
   
   bool proc_intro2_connect(intro_material_t *t)
   {
     LOG_INFO("proc_intro2_connect...\n");
-    th_t *tt=new th_t;
-    tt->t=t;
-    tt->o=this;
-#ifndef LINUX
-    esp_memory_info();
-#endif
-    mut_th.lock();
-    if(nthu>=nth) {
-      mut_th.unlock();
-      printf("too many active threads\n");
-      return 0;
-    }
-    nthu++;
-    
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    // size_t stacksize;
-    // pthread_attr_getstacksize(&attr, &stacksize);
-    // printf("Thread stack size = %d bytes \n", int(stacksize));
-    int r=pthread_create(&(tt->thid),&attr,proc_intro2_connect_th,tt);
-    if(r)
-      LOG_SEVERE("pthread_create fails in proc_intro2_connect r=%d\n",r);
-    pthread_detach((tt->thid));
-    mut_th.unlock();
-#ifndef LINUX
-    esp_memory_info();
-#endif
-    LOG_INFO("proc_intro2_connect done\n");
+    auto tt=new server_t;
+    tt->init(this,t,this);
+    ls.push_back(tt);
     return 1;
   }
+
+  void clean_servers() {
+    LOG_INFOV("clean severs...\n");
+    list<server_t*> ls2;
+    for(auto &it:ls) {
+      if(it->check_alive()==false) {
+	LOG_INFOV("clean severs : delete %p...\n",it);
+	delete it;
+      } else {
+	ls2.push_back(it);
+      }
+    }
+    ls.swap(ls2);
+  }
   
+
   bool proc_intro2(circuit_t *it)
   {
     LOG_INFO("== has_intro2 returns ==\n");
@@ -1424,31 +1571,39 @@ struct hs_server_t {
   }
 
   void loop() {
+    const int D=20;//  //DDDD ->20
     static int k=0;
-    printf("hs server loop %d\n",k);
-    if((k%15)==0) {
-      site.print_info();
-      print2();
-      print(1);
+    LOG_INFOV("hs server loop %d \n",k);
 
-      if(k%180==0) {
-	remove_old_hd();
+    if((k%D)==0 && tor_is_ok()) {
+#ifdef ESP
+      esp_memory_info();
+#endif
+      print_mem_stat();
+      printf("hostname: ");site.print_host();
+      //print2();
+      //print(1);
+
+      if(hd.size()<=1)
 	create_hsdescs();
-	publish((k%1800)==0);
-      } else {
-	publish(0);
-      }	
+      remove_old_hd();
+      if(hd.size()>2)
+	LOG_FATAL("something wrong: more than two timeperiods !\n");
+      
+      if(!no_hs_publish) publish(); //k%(D*100)==0);
     }
 
     k++;
 
-    for(auto &it:mintros) {
-      auto ci=it.second;
-      if(false==ci->is_working()) {
-	ci->check();
+    if(tor_is_ok()) {
+      for(auto &ht:hd) {
+	auto ci=ht.second->intros;
+	if(false==ci->is_working()) {
+	  ci->check();
+	}
       }
     }
-    
+
     for(auto &ht:hd) {
       for(int i=0;i<ht.second->tci.size();i++) {
 	auto tc=ht.second->tci[i];
@@ -1463,7 +1618,30 @@ struct hs_server_t {
     //site.print_info();
   }
   
-  void init() {
+  void finish() {
+    remove_all_hd();
+    for(auto &it:ls)
+      delete it;
+    ls.clear();
+  }
+
+  virtual ~hs_server_t() {
+    finish();
+    union_poller_t::pollable_t::unreg();
+  }
+
+  virtual void pcallback(pollable_t **chain,poll_reg_t &fds) {
+    if(chain[0]==NULL) {
+      assert(fds.events==POLL_TIMEOUT);
+      loop();
+      return;
+    }
+    union_poller_t::pcallback(chain,fds);
+  }
+  
+  
+  void init(const string &path) {
+    
 #ifndef LINUX
     if(!site.read_spiffs()) {
       LOG_INFO("hs_keys not found, generate new HS key\n");
@@ -1475,35 +1653,41 @@ struct hs_server_t {
 
       site.write_spiffs();
     }
-#else
-    //site.generate();
-    memcpy(site.secret_key,mysec_hs,64); //mysec_hs/mypub_hs are in private.hpp. put your, or use site.generate() for a new key
-    memcpy(site.public_key,mypub_hs,32);
-#endif
-    site.print_info();
 
+
+#else
+    if(path=="hard") {
+      memcpy(site.secret_key,mysec_hs,64); //mysec_hs/mypub_hs are in private.hpp. put your, or use site.generate() for a new key
+      memcpy(site.public_key,mypub_hs,32);
+    } else if(path=="" || path=="random") {
+      site.generate();  //force new key
+      site.write("hstmp/");
+    } else {
+      if(!site.read(path.c_str())) {
+	LOG_SEVERE("cannot read hs key in %s/. generate new one\n",path.c_str());
+	site.generate();  //force new key
+	site.write("hstmp/");
+      }
+    }
+
+#endif
+    
+    site.print_info();
 
     parse_onionv3(site.get_ad().c_str(),pub);
     assert(match(pub,site.public_key,32));
-
-    while(1) {
-      loop();
-      usleep(500*1000);
-    }
   }
-
+  
 };
 
 
 /// for HS client
 
-
 struct hsdesc_processor_t : public hsdesc_t {
   hsdirs_t *hsdir=NULL;
   
   char bf[256];
-  clientbuff_t<256> cb;
-
+  aclientbuff_t<256> cb;
 
   bool surenc=0;
 
@@ -1512,7 +1696,6 @@ struct hsdesc_processor_t : public hsdesc_t {
 
   int salted=0;
   int salted2=0;
-
 
   intro_node_t node;
 
@@ -1523,7 +1706,7 @@ struct hsdesc_processor_t : public hsdesc_t {
   unsigned char pemkey[400];
   int keysize=0;
   
-  void process_intro_point() {
+  void finish_process_intro_point() {
     if(!node.isnull()) {
       bool ok=1;
       memcpy(node.subcred,subcred,32);
@@ -1574,7 +1757,7 @@ struct hsdesc_processor_t : public hsdesc_t {
   {
     //for(int i=0;i<l;i++)      if(bf[i]==0) printf("P2 0 at %d / %d !!\n",i,l);
     
-    LOG_INFO("=HSDIR2= %s",bf);
+    LOG_INFOV("=HSDIR2= %s",bf);
     if(iskey2) {
       if(strncmp(bf,"-----BEGIN",10)==0) {
       
@@ -1614,7 +1797,7 @@ struct hsdesc_processor_t : public hsdesc_t {
     auto r=cut(bf);
     if(r.size()==0) return;
     if(r[0]=="introduction-point" && r.size()>1) {
-      process_intro_point();
+      finish_process_intro_point();
       
       decode_link_specifier_b64(node,r[1].c_str());
     }
@@ -1643,18 +1826,6 @@ struct hsdesc_processor_t : public hsdesc_t {
 
   void process_enc(unsigned char *dbf,int l)
   {
-    // for(int i=0;i<l;i++) {
-    //   printf("(%02x)",dbf[i]);
-    // }
-    // printf("\n");
-
-    // if(end2) {
-    //   printf("END2 ");
-    //   for(int i=0;i<l;i++)
-    // 	printf("%02x ",int(dbf[i]));
-    //   printf("\n");
-    //   return;
-    // }
 
     static FILE *fo=fopen("enc","w");
 
@@ -1666,7 +1837,7 @@ struct hsdesc_processor_t : public hsdesc_t {
     while((r=nl2.read(bf,255))>0) {
       if(bf[r-1]==0) {
 	end2=1;
-	LOG_INFO("END2...\n");
+	LOG_INFOV("END2...\n");
       }
       bf[r]=0;
       process_layer2(bf,r);
@@ -1738,9 +1909,6 @@ struct hsdesc_processor_t : public hsdesc_t {
 
   void process_layer1(const char *bf,int l)
   {
-    //for(int i=0;i<l;i++)
-    //  if(bf[i]==0) printf("P1 0 at %d / %d !!\n",i,l);
-
     if(bf[0]!=0)
       if(!enc)
       	LOG_DEBUG("=HSDIR1= %s",bf);
@@ -1760,13 +1928,8 @@ struct hsdesc_processor_t : public hsdesc_t {
   
   void process_superenc(unsigned char *dbf,int l)
   {
-    if(end1) {
-      // printf("END1 ");
-      // for(int i=0;i<l;i++)
-      // 	printf("%02x ",int(dbf[i]));
-      // printf("\n");
+    if(end1)
       return;
-    }
     nl1.update((char*)dbf,l);
     char bf[256];
     int r=0;
@@ -1782,12 +1945,6 @@ struct hsdesc_processor_t : public hsdesc_t {
   
   void decode_superenc(unsigned char *bf,int l)
   {
-    // printf("DDD1 ");
-    // for(int i=0;i<l;i++)
-    //   printf("%02x ",int(bf[i]));
-    // printf("\n");
-
-
     if(l==0) return;
     if(salted==0) {
       assert(l>=16);
@@ -1937,6 +2094,7 @@ struct hsdesc_processor_t : public hsdesc_t {
 
   const char *prefix="Tor onion service descriptor sig v3";
 
+#if 0
   int process_hs_descriptor(const char *fn) {
     FILE *in=fopen(fn,"r");
     if(!in)
@@ -1954,7 +2112,7 @@ struct hsdesc_processor_t : public hsdesc_t {
     }
     //printf("EOF\n");
     
-    process_intro_point();
+    finish_process_intro_point();
 
     if(sigok==0) {
       LOG_WARN("no/bad sig\n");
@@ -1973,8 +2131,9 @@ struct hsdesc_processor_t : public hsdesc_t {
 
     return DESCR_OK;
   }
+#endif
   
-  int download_hs_descriptor_in(socket_t &sock,ip_info_node_t &dir,hsdirs_t &hd)
+  int download_hs_descriptor_in(asocket_t &sock,ip_info_node_t &dir,hsdirs_t &hd)
   {
     hsdir=&hd;
     string hs=hd.hsreq;
@@ -1997,7 +2156,7 @@ struct hsdesc_processor_t : public hsdesc_t {
     }
 
     cb.clear();
-    cb.sock=&sock;
+    cb.set_sock(&sock);
 
     append(allmessage,(const unsigned char*)prefix,strlen(prefix));;
     
@@ -2009,19 +2168,21 @@ struct hsdesc_processor_t : public hsdesc_t {
 	fail=1;
 	break;
       }
+      bf[rr]=0;
+      printf("HSD %s",bf);
       process_line_hsdescriptor(bf,rr);
-      
     }
 
-    process_intro_point();
+    finish_process_intro_point();
     
+    printf("DONE HSD\n");
+
     cb.clear();
 
     if(badcrypto) {
       LOG_WARN("crypto fail\n");
       return DESCR_BAD_CRYPTO;
     }
-
 
     if(fail) {
       LOG_WARN("sock operation failed\n");

@@ -21,6 +21,8 @@
 #include <sys/stat.h>
 #include "esp_err.h"
 #include "nvs_flash.h"
+#include <string>
+
 #ifdef USEFS
 #include "esp_spiffs.h"
 #endif
@@ -427,9 +429,36 @@ void esp_init(void)
 #endif
 }
 
+
+std::string esp_heap_info_cap(uint32_t caps)
+{
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, caps);
+  char tmp[200];
+  snprintf(tmp,199,"free %d allocated %d min_free %d largest_free_block %d alloc_blocks %d free_blocks %d total_blocks %d",
+	   info.total_free_bytes, info.total_allocated_bytes, info.minimum_free_bytes,
+	   info.largest_free_block, info.allocated_blocks,
+	   info.free_blocks, info.total_blocks);
+  return tmp;
+}
+
+std::string esp_heap_info(const std::string &endl)
+{
+  std::string r;
+  r+=std::string("TOT: ")+esp_heap_info_cap(0)+endl;
+  r+=std::string("INT: ")+esp_heap_info_cap(MALLOC_CAP_INTERNAL)+endl;
+  r+=std::string("SPI: ")+esp_heap_info_cap(MALLOC_CAP_SPIRAM)+endl;
+  
+  return r;
+}
+
+
 void esp_memory_info() {
   printf("mem info 8BIT:");
   heap_caps_print_heap_info(MALLOC_CAP_8BIT);
   printf("mem info SPIRAM:");
   heap_caps_print_heap_info(MALLOC_CAP_SPIRAM);
+
+  auto r=esp_heap_info("\n");
+  printf("%s",r.c_str());
 }

@@ -1,11 +1,27 @@
 #pragma once
 
-#define TOR_REFRESH_TIME 3600*2 //2h
+#if 1 //TEST
+#define TOR_REFRESH_TIME 5*60 //5m
+#define TOR_REFRESH_TIME_WHEN_FAILS 5*60 //5m
 #define TOR_SAVE_TIME 3600*12 //12h 
 
-#define TOR_REFRESH_LOOP_TIME 3600 //1h
+#define TOR_HSDIR_REPUBLISH_TIME (30*60) //30min
+#define TOR_HSDIR_REPUBLISH_TIME_WHEN_FAILS (10*60) //10 min minimum time before retring when fails
+
+#define TOR_JOB_TIMELIMIT 5000 //15s if a circuit is build (to a intro point, or a hsdir) and he introduction / publish is not done in TOR_JOB_TIMELIMIT ms, we suppose that there is a problem with the circuit
+
+#else
+
+#define TOR_REFRESH_TIME 5*60 // 3600*2 //2h
+#define TOR_REFRESH_TIME_WHEN_FAILS 10*60 //10MIN
+#define TOR_SAVE_TIME 3600*12 //12h 
 
 #define TOR_HSDIR_REPUBLISH_TIME (120*60) //2h
+#define TOR_HSDIR_REPUBLISH_TIME_WHEN_FAILS (10*60) //10 min minimum time before retring when fails
+
+#define TOR_JOB_TIMELIMIT 15000 //15s if a circuit is build (to a intro point, or a hsdir) and he introduction / publish is not done in TOR_JOB_TIMELIMIT ms, we suppose that there is a problem with the circuit
+
+#endif
 
 /*
   some other #defines :
@@ -32,7 +48,7 @@
 
 #else //ESP
 
-#define USEFS
+//#define USEFS //spiffs problem...
 
 #endif
 
@@ -175,17 +191,19 @@ public:
   unsigned int maxsize() const {return maxsize_;}
   ps_vector(unsigned int ms=16384) {
     maxsize_=ms;
+    void *x=NULL;
 #ifdef ESP
-    tab=(C_t*)heap_caps_malloc(maxsize_*sizeof(C_t), MALLOC_CAP_SPIRAM);
+    x=(C_t*)heap_caps_malloc(maxsize_*sizeof(C_t), MALLOC_CAP_SPIRAM);
 #else
-    tab=new C_t[maxsize_];
+    x=malloc(maxsize_*sizeof(C_t));
 #endif
+    tab=new(x) C_t[maxsize_];
   }
   ~ps_vector() {
 #ifdef ESP
     heap_caps_free(tab);
 #else
-    delete[] tab;
+    free(tab);
 #endif
   }
   void resize(unsigned int n) {

@@ -1,26 +1,39 @@
 #pragma once
-#include "dir.hpp"
-#include "cell.hpp"
 #include <map>
 #include <list>
-#include "defines.hpp"
 #include <functional>
+
+#include "defines.hpp"
+#include "dir.hpp"
+#include "cell.hpp"
 
 #define CONNECT_TIMEOUT 5000   //timeout in build circuit phase, in ms
 
-enum cb_t {
-  CB_NOTHING,
 
-  CB_CIRCUIT_BUILT_FAIL,
-  CB_CIRCUIT_BUILT_OK,
+// enum for callback circuit -> circuit manager
 
-  CB_RELAY_BEGIN,
-  CB_RELAY_END,
+#define FOREACH_ENUM_CCB(ENUM_CCB) \
+  ENUM_CCB(CCB_NOTHING)\
+  ENUM_CCB(CCB_CIRCUIT_BUILT_FAIL)\
+  ENUM_CCB(CCB_CIRCUIT_BUILT_OK)\
+  ENUM_CCB(CCB_RELAY_BEGIN)\
+  ENUM_CCB(CCB_RELAY_END)\
+  ENUM_CCB(CCB_STREAM_DESTROYED)\
+  ENUM_CCB(CCB_INTRO2)\
+  ENUM_CCB(CCB_CONNECTED)\
+  ENUM_CCB(CCB_RENDEZVOUS_ESTABLISHED)\
+  ENUM_CCB(CCB_INTRO_ESTABLISHED)\
+  ENUM_CCB(CCB_DESTROY)\
 
-  CB_INTRO2,
 
-  CB_DESTROY,
+static const char *CCB_ENUM_STRING[] = {
+  FOREACH_ENUM_CCB(GENERATE_STRING)
 };
+
+enum ccb_t {
+  FOREACH_ENUM_CCB(GENERATE_ENUM)
+};
+
 
 struct intro_material_t {
   unsigned char public_key[32]; //aka X
@@ -34,8 +47,6 @@ struct intro_material_t {
       delete intro_keys;
   }
 };
-
-
 
 struct rdv_material_t {
   unsigned char rdvc[20]; //rendez vous cookie
@@ -57,34 +68,55 @@ struct rdv_material_t {
 
 };
 
+#define FOREACH_ENUM_BS(ENUM_BS) \
+    ENUM_BS(BS_NONE)  \
+    ENUM_BS(BS_START_CONNECT)  \
+    ENUM_BS(BS_WAIT_CONNECTED)  \
+    ENUM_BS(BS_WAIT_TLS)  \
+    ENUM_BS(BS_START_HAND)  \
+    ENUM_BS(BS_PROTO_START)  \
+    ENUM_BS(BS_PROTO_VERSION)  \
+    ENUM_BS(BS_PROTO_CERTS)  \
+    ENUM_BS(BS_PROTO_AUTH)  \
+    ENUM_BS(BS_PROTO_NETINFO)  \
+    ENUM_BS(BS_PROTO_DONE)  \
+    ENUM_BS(BS_CREATE2)  \
+    ENUM_BS(BS_WAIT_CREATED2)  \
+    ENUM_BS(BS_CREATED2)  \
+    ENUM_BS(BS_EXTEND2)  \
+    ENUM_BS(BS_WAIT_EXTENDED2)  \
+    ENUM_BS(BS_EXTENDED2)  \
+    ENUM_BS(BS_BUILT)  \
+    ENUM_BS(BS_DESTROY)  \
+    ENUM_BS(BS_DESTROYED)  \
+    ENUM_BS(BS_FAIL)  \
 
-struct circuit_t {
-#ifdef MEMDBG
+  static const char *BS_ENUM_STRING[] = {
+    FOREACH_ENUM_BS(GENERATE_STRING)
+  };
+
+struct circuit_t : public sockcell_t {
+
+#ifdef MEMDBGSUB
   void * operator new(size_t size)
   {
-    void * p = malloc(size);
-    _mn[p]=size;
-    printf("*** circuit_t::new %p size=%d\n",p,int(size));
+    void * p = malloc(size); //MEMDBG
+    printf("*** new circuit_t %p size=%d\n",p,int(size));
     return p;
   }
     
   void operator delete(void * p)
   {
-    auto size=_mn[p];
-    printf("*** circuit_t::delete %p size=%d\n",p,int(size));
-    memset(p,0x43,size);
-    _mn.erase(p);
-    //free(p);
+    printf("*** delete circuit_t %p \n",p);
+    free(p);
   }
 #endif
   
+  
 protected:
-  short dbg_=DBGBASE;
-  sockcell_t sock;
-
   void log(const char *file,const char *fn,int line,int lvl, const char* format, ... )
   {
-    if(lvl>dbg_) return;
+    if(lvl>dbg) return;
     va_list arglist;
     
     printf("[%s][circuit %p :: %s:%d ][cid:%x] ",loglvlstr[lvl],this,fn,line,circuit_id);
@@ -93,13 +125,11 @@ protected:
     va_end( arglist );
   }
 
-  string name="noname";
-
 public:
 
-  int Nnodes=3;
-  vector<relay_t*> nodes;
+  char Nnodes=3;
   bool firstconnection=0;
+  vector<relay_t*> nodes;
   
 protected:
   unsigned short link_protocol_version; 	// the version of this circuit
@@ -120,31 +150,32 @@ public:
 
   bool check_alive() {
     if(build_status==BS_FAIL || build_status==BS_DESTROYED|| build_status==BS_DESTROY) return 0;
-    if(get_unix_time()-lastcell>120) {
+    int dt=get_unix_time()-lastcell;
+    if(dt>120) {
       //if no cell in 2 minutes, suppose dead
-      printf("circuit %x is silent: dead it\n",circuit_id);
+      printf("circuit %x is silent (since %d secs) : suppose it dead\n",circuit_id,dt);
       set_status(BS_DESTROY);
     }
     return build_status==BS_BUILT;
   }
 
-  typedef std::function<void(cb_t)> callback_t;
+  typedef std::function<void(ccb_t)> callback_t;
   typedef std::function<void(const unsigned char *,int l)> stream_callback_t;
   
   callback_t ncb=NULL;
 
   void set_ncb(callback_t ncb_) {
-    LOG_INFO("set callback %p\n",ncb_);
+    LOG_DEBUG("set callback %p\n",ncb_);
     cb_lock();
     ncb=ncb_;
     cb_unlock();
   }
 
   struct stream_t {
-    short dbg_=DBGBASE;
     void log(const char *file,const char *fn,int line,int lvl, const char* format, ... )
     {
-      if(lvl>dbg_) return;
+      if(circuit==NULL) return;
+      if(lvl>circuit->dbg) return;
       va_list arglist;
       
       printf("[%s][circuit %p stream %p :: %s:%d ][cid:%x][sid:%x] ",loglvlstr[lvl],circuit,this,fn,line,circuit->circuit_id,stream_id);
@@ -175,6 +206,11 @@ public:
       stream_id=0;
     }
 
+    ~stream_t() {
+      if(ncb_data)
+       ncb_data(NULL,CCB_STREAM_DESTROYED);
+    }
+    
     void init(circuit_t *c,int a) {
       window = 500;
       window_out = 500;
@@ -208,7 +244,8 @@ public:
       LOG_WARN("RELAY_BEGIN stream_id=%x.\n",stream_id);
 
       connected=1;
-      if(ncb_data) ncb_data(NULL,CB_RELAY_BEGIN);
+      if(ncb_data)
+	ncb_data(NULL,CCB_RELAY_BEGIN);
       
       vector<unsigned char> payload;
       circuit->write_data(cell_relay_command_t::RELAY_CONNECTED, payload,stream_id);
@@ -249,22 +286,22 @@ public:
 	  finished=1;
 
 	  if(ncb_data)
-	    ncb_data(NULL,CB_RELAY_END);
+	    ncb_data(NULL,CCB_RELAY_END);
 
-	  delete cell;
+	  circuit->delete_cell(cell);
 	  return false;
 	}
       
 	if (cell->relay_command == cell_relay_command_t::RELAY_END) {
 	
-	  LOG_INFO("Read received RELAY_END (cause: %s payload=%s). Finished.\n",relay_end_reason_str((relay_end_reason_t)cell->payload(0)),to_str(cell->const_payload(),cell->size).c_str());
+	  LOG_INFOV("Read received RELAY_END (cause: %s payload=%s). Finished.\n",relay_end_reason_str((relay_end_reason_t)cell->payload(0)),to_str(cell->const_payload(),cell->size).c_str());
 	  
 	  finished=1;
 
 	  if(ncb_data)
-	    ncb_data(NULL,CB_RELAY_END);
+	    ncb_data(NULL,CCB_RELAY_END);
 
-	  delete cell;
+	  circuit->delete_cell(cell);
 	  return true;
 	}
 
@@ -274,18 +311,18 @@ public:
 
 	  window_out+=50;
 
-	  delete cell;
+	  circuit->delete_cell(cell);
 	  return true;
 	}
 
 	if (cell->relay_command == cell_relay_command_t::RELAY_CONNECTED) {
 	  LOG_INFOVV("stream %x connected\n", stream_id);
-	  LOG_INFOVV("relay_connected payload ",cell->const_payload(),cell->size);
+	  LOG_INFOVV("relay_connected payload\n",cell->const_payload(),cell->size);
 
 	  connected=1;
-	  if(ncb_data) ncb_data(NULL,CB_RELAY_BEGIN);
+	  if(ncb_data) ncb_data(NULL,CCB_RELAY_BEGIN);
 
-	  delete cell;
+	  circuit->delete_cell(cell);
 	  return true;
 	}
 
@@ -338,7 +375,7 @@ public:
 	  }
 	  
 	  got_resolved=1;
-	  delete cell;
+	  circuit->delete_cell(cell);
 	  return true;
 	}
 
@@ -349,7 +386,7 @@ public:
 	    ncb_data(cell->const_payload(),cell->size);
 
 	  
-	  delete cell;
+	  circuit->delete_cell(cell);
 
 	  window--;
 	  circuit->window--;
@@ -360,16 +397,15 @@ public:
 	}
       
 	LOG_WARN("stream %x : RELAY Command %s not handled\n",sid,relay_cell_command_str(cell->relay_command));
-	delete cell;
+	circuit->delete_cell(cell);
 	return false;
       }
 
       LOG_WARN("Command %s not handled\n",cell->command_str());
       never_here();
-      delete cell;
+      circuit->delete_cell(cell);
       return false;
     }
-
   
     bool finish() {
       if(connected && !finished) {
@@ -390,12 +426,9 @@ public:
     
       return true;
     }
-
-
   };
 
   map<int,stream_t> streams;
-
   
   bool hs_circuit=0;
   char rendezvous_ok=0;
@@ -420,46 +453,66 @@ public:
     auto r=intro2_ok.pop();
     return r;
   }
-  
-  circuit_t(string x="") {
-    int n=3;
-    name=x;
+
+  void init(int n=3) {
     Nnodes=n;
     nodes.resize(n,NULL);
-    
     circuit_id=0;
     link_protocol_version = 0;
     window = 1000;
     window_out = 1000;
   }
+  
+  circuit_t() {
+    init();
+    poller=&main_poller;
+  }
+
+  circuit_t(poller_t &p) {
+    init();
+    poller=&p;
+  }
+
+  bool send_cell(cell_t *cell) {
+    cell->prepare_send_cell();
+    int r=sockcell_t::send(cell);
+    if(!r)
+      LOG_WARN("send_cell failed (sockcell::exiting=%d)\n",sockcell_t::exiting);
+    return r;
+  }
 
   void destroy_circuit(destroy_reason_t reason = destroy_reason_t::NONE ) {
     LOG_INFOV("Sending DESTROY cell to Guard with reason %u\n", int(reason));
+    LOG_INFOV("old status = %d %s\n", int(build_status),BS_ENUM_STRING[build_status]);
     if(build_status==BS_DESTROYED) {
       LOG_INFOV("already DESTROYed\n");
+      assert(streams.empty());
       return;
     }
+    set_status(BS_DESTROYED);
+
+    streams.clear();
     
     auto cell = new cell_t_small(link_protocol_version, circuit_id, cell_command_t::DESTROY);
     
     cell->push_back(int(reason));
-    cell->send_cell(sock);
+    send_cell(cell);
     
-    sock.disconnect();
-
+    if(poller) {
+      unreg();
+      poller=NULL;
+    }
     LOG_INFOVV("Circuit destroy success.\n");
-    set_status(BS_DESTROYED);
     if(ncb)
-      ncb(CB_DESTROY);
+      if(build_status==BS_BUILT)
+	ncb(CCB_DESTROY);
   }
 
-  ~circuit_t() {
+  virtual ~circuit_t() {
     LOG_DEBUG("~circuit_t\n");
 
     if(build_status!=BS_FAIL && build_status!=BS_DESTROYED)
       destroy_circuit();
-
-    sock.disconnect();
 
     for(int i=0;i<Nnodes;i++)
       if (nodes[i] != NULL) delete nodes[i];
@@ -597,34 +650,12 @@ public:
   }
   /*============ build2 ============*/
 
+
   enum build_status_t {
-    BS_NONE,
-
-    BS_START_CONNECT, 
-    BS_CONNECT, //TODO async
-    BS_PROTO_START,
-    BS_PROTO_VERSION,
-    BS_PROTO_CERTS,
-    BS_PROTO_AUTH,
-    BS_PROTO_NETINFO,
-    BS_PROTO_DONE,
-    BS_CREATE2,
-    BS_WAIT_CREATED2,
-    BS_CREATED2,
-
-    BS_EXTEND2,
-    BS_WAIT_EXTENDED2,
-    BS_EXTENDED2,
-    
-    BS_BUILT,
-
-    BS_DESTROY,
-    BS_DESTROYED,
-
-    BS_FAIL,
+      FOREACH_ENUM_BS(GENERATE_ENUM)
   } build_status=BS_NONE ;
-
-  int build_hops=0;
+    
+  short build_hops=0;
   barrier_t bar_build;
 
   void set_status(build_status_t i)
@@ -683,16 +714,16 @@ public:
 	if it contains an odd number of bytes).
       */
       
-      LOG_DEBUG("start_in_protocol_with_guard : send VERSIONS");
+      LOG_DEBUG("start_in_protocol_with_guard : send VERSIONS\n");
       cell_t *cell= new cell_t_small(0, circuit_id, cell_command_t::VERSIONS);
 	
       // I can handle version 4 and 5
       cell->push_back_short(4);
       cell->push_back_short(5);
 	
-      cell->send_cell(sock);
+      if(!send_cell(cell)) return 0;
       build_status=BS_PROTO_VERSION;
-      LOG_DEBUG("start_in_protocol_with_guard : wait VERSIONS");
+      LOG_DEBUG("start_in_protocol_with_guard : wait VERSIONS\n");
       return 1;
     }
 
@@ -704,22 +735,22 @@ public:
     if(build_status==BS_PROTO_VERSION) {
       if (cell->command != cell_command_t::VERSIONS) {
 	LOG_WARN(" expected VERSIONS cell but received %s.\n", cell->command_str());
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
 
-      link_protocol_version=sock.linkversion;
+      link_protocol_version=sockcell_t::linkversion;
       
       if (link_protocol_version < 4) {
 	LOG_WARN(" Guard has an old link protocol (version %d but required >= 4).\n", link_protocol_version);
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
 
-      delete cell;
+      delete_cell(cell);
 
       build_status=BS_PROTO_CERTS;
-      LOG_DEBUG("start_in_protocol_with_guard : wait CERTS");
+      LOG_DEBUG("start_in_protocol_with_guard : wait CERTS\n");
 
       return 1;
     }
@@ -727,35 +758,35 @@ public:
     if(build_status==BS_PROTO_CERTS) {
       if (cell->command != cell_command_t::CERTS) {
 	LOG_WARN("expected CERTS cell but received %s.\n", cell->command_str());
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
 
       if (!process_cert_cell(*nodes[0],cell->const_payload(),cell->size)) {
 	LOG_WARN("problem with CERTS\n");
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
 
-      delete cell;
+      delete_cell(cell);
 
       build_status=BS_PROTO_AUTH;
-      LOG_DEBUG("start_in_protocol_with_guard : wait AUTH_CHANLLENGE");
+      LOG_DEBUG("start_in_protocol_with_guard : wait AUTH_CHANLLENGE\n");
       return 1;
     }
     
     if(build_status==BS_PROTO_AUTH) {
       if (cell->command != cell_command_t::AUTH_CHALLENGE) {
 	LOG_WARN("expected AUTH_CHALLENGE cell but received %s.\n", cell->command_str());
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
       
-      LOG_DEBUG("WARNING: AUTH_CHALLENGE cell is not handled at moment from this version.\n");
+      LOG_DEBUG("TODO: AUTH_CHALLENGE cell is not handled at moment from this version.\n");
       // TODO dont't mind for now..
 
-      delete cell;
-      LOG_DEBUG("start_in_protocol_with_guard : wait NETINFO");
+      delete_cell(cell);
+      LOG_DEBUG("start_in_protocol_with_guard : wait NETINFO\n");
       build_status=BS_PROTO_NETINFO;
       return 1;
     }
@@ -763,22 +794,22 @@ public:
     if(build_status==BS_PROTO_NETINFO) {
       if (cell->command != cell_command_t::NETINFO) {
 	LOG_WARN("expected NETINFO cell but received %s.\n", cell->command_str());
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
       
       LOG_DEBUG("Info: this version do not check or handle incoming NETINFO cell.\n");
       
-      delete cell;
+      delete_cell(cell);
 
-      LOG_DEBUG("start_in_protocol_with_guard : send NETINFO");
+      LOG_DEBUG("start_in_protocol_with_guard : send NETINFO\n");
 
       cell_t * cell = new cell_t_small( link_protocol_version, circuit_id, cell_command_t::NETINFO );
       struct in_addr public_ip;
       inet_aton(get_public_ip().c_str(), &public_ip);
       cell->create_netinfo(public_ip);
-      cell->send_cell(sock); 
-      
+      if(!send_cell(cell)) return 0;
+     
       build_status=BS_PROTO_DONE;
       
       return true;
@@ -787,15 +818,30 @@ public:
     never_here();
   }
 
-
   bool continue_build_circuit(cell_t *cell,int time=0) {
-    LOG_INFOV("continue_build_circuit build_status=%d cell=%p\n",int(build_status),cell);
+    LOG_INFOV("continue_build_circuit build_status=%d %s cell=%p\n",int(build_status),BS_ENUM_STRING[build_status],cell);
+
+
+    if(build_status==BS_START_HAND) { //only with new sockcell
+      build_status=BS_PROTO_START;
+      if(cell) {
+	LOG_WARN("cell should be null!\n");
+	delete_cell(cell);
+	cell=NULL;
+      }
+      if (!start_in_protocol_with_guard()) {
+	LOG_WARN("Failed to start InProtocol with guard.\n");
+	return false;
+      }
+
+      return 1;
+    }
 
     if(cell==NULL) {
       LOG_INFO("timelimit %d ms: FAIL build\n",time);
       return 0;
     }
-    
+
     if(build_status>=BS_PROTO_START && build_status<BS_PROTO_DONE) {
       int r=start_in_protocol_with_guard(cell);
       if(!r) return 0;
@@ -860,13 +906,18 @@ public:
     
     if(build_status==BS_CREATED2 || build_status==BS_EXTENDED2) {
       if(build_hops==Nnodes) {
-	LOG_INFOVV("EXTEND2 with Exit success. All done!!\n");
-	
-	print_circuit_info();
-	
+	LOG_INFOV("EXTEND2 with Exit success. Circuit built!\n");
 	lastcell=get_unix_time();
-	
 	build_status=BS_BUILT;
+	if(dbg>=_LOG_INFOV)
+	  print_circuit_info();
+
+#if 1 //TEST BLOCKING
+	LOG_DEBUG(" *TEST*TEST* set fd %d blocking\n",fd);
+	asocket_raw_t::set_blocking();
+#endif
+
+	
 	bar_build.kill();
 	return 1;
       }
@@ -895,9 +946,11 @@ public:
     return ok;
   }
 
+  string host;
+  
   bool async_build_circuit() {
     // If it was previously created or a tentative was in place, tear down the previous.
-    LOG_DEBUG("async build circuit...");
+    LOG_DEBUG("async build circuit...\n");
     assert(build_status==BS_NONE);
 
 
@@ -906,47 +959,31 @@ public:
 	return 0;
     }
 
-    build_status = BS_START_CONNECT;
-
-    auto client = new socket_tls_t();
-    client->set_timeout(3000+42,5000+42);
-    //client->blocking=0;
-    sock.client=client;
-
-    build_status = BS_CONNECT;
-
-    LOG_INFOV("connect to guard %s\n",ipv4_to_string(*(in_addr*)(nodes[0]->ipv4)).c_str());
-    if (1 != client->connect(ipv4_to_string(*(in_addr*)(nodes[0]->ipv4)), nodes[0]->port ) ) {
-      LOG_WARN("Failed to connect to Guard.\n");
-      return false;
-    }
-
     firstconnection=1;
 
-    LOG_INFOVV("Connected to guard node.\n");
+    build_status = BS_START_HAND;
 
-    char tmp[100];
-    snprintf(tmp,99," circuit=%p",this);
-    sock.launch_th(name+string(tmp));      
-    //sock.timeout=something;
-      
-    nodes[0]->allocate_temp();
-    
-    sock.set_callback(std::bind(&circuit_t::cb_cell,this,std::placeholders::_1,std::placeholders::_2,std::placeholders::_3));
+    asocket_tls_t::setup_socket();
+    poll_reg_t r;
+    r.events=POLL_TIMEOUT|POLL_POLLOUT;
+    r.fd=fd;
+    r.timeout=5000; //5 sec timeout
+#ifdef DBGPOLL
+    r.name=name;
+#endif
+    reg(r);
+    host=ipv4_to_string(*(in_addr*)(nodes[0]->ipv4));
 
-    build_status =BS_PROTO_START;
-
-    // Here I will use the IN-PROTOCOL HANDSHAKE
-
-    LOG_DEBUG("start_in_protocol_with_guard...");
-
-    if (!start_in_protocol_with_guard()) {
-      LOG_WARN("Failed to start InProtocol with guard.\n");
+    LOG_INFOV("connect to guard %s\n",ipv4_to_string(*(in_addr*)(nodes[0]->ipv4)).c_str());
+    if (1 != asocket_tls_t::connect_ipv4(*(in_addr*)nodes[0]->ipv4, nodes[0]->port ) ) {
+      LOG_WARN("Failed to connect to Guard.\n");
       return false;
     }
 
     return 1;
   }
+    
+
 
   bool create2(relay_t *relay,cell_t *cell=NULL) {
     if(build_status==BS_CREATE2) {
@@ -960,7 +997,7 @@ public:
 	return false;
       }
       
-      cell->send_cell(sock);
+      if(!send_cell(cell)) return 0;
 
       build_status=BS_WAIT_CREATED2;
       return 1;
@@ -971,7 +1008,7 @@ public:
     if(build_status==BS_WAIT_CREATED2) {
       if (cell->command == cell_command_t::DESTROY) {
 	LOG_WARN("DESTROY received! Reason = 0x%02X (%s)\n", cell->payload(0), relay_truncated_reason_str((destroy_reason_t)(cell->payload(0))));
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
       
@@ -979,20 +1016,20 @@ public:
 	LOG_WARN("response contains %s cell instead of CREATED2. Failure.\n", cell->command_str());
 	if (cell->command == cell_command_t::DESTROY)
 	  LOG_WARN("DESTROY received! Reason = 0x%02X (%s)\n", cell->payload(0), relay_truncated_reason_str((destroy_reason_t)(cell->payload(0))));
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
-      LOG_DEBUG("CREATED2");
+      LOG_DEBUG("CREATED2\n");
       
       if (!relay->finish_handshake(cell->const_payload(),cell->size)) {
 	LOG_WARN("Error on concluding handshake!\n");
 	// From now... always destroy
 	destroy_circuit();
-	delete cell;
+	delete_cell(cell);
 	return false;
       }
       
-      delete cell;
+      delete_cell(cell);
       
       build_status=BS_CREATED2;
       return true;
@@ -1022,7 +1059,7 @@ public:
       for(int u=num-1;u>=0;u--)
 	cell->encrypt(nodes[u]->skin);
 
-      cell->send_cell(sock);
+      if(!send_cell(cell)) return 0;
       build_status=BS_WAIT_EXTENDED2;
       
       return 1;
@@ -1037,7 +1074,7 @@ public:
 	LOG_WARN("response contains %s cell instead of RELAY. Failure.\n", cell->command_str());
 	if (cell->command == cell_command_t::DESTROY)
 	  LOG_WARN("DESTROY received! Reason = 0x%02X (%s)\n", cell->payload(0), relay_truncated_reason_str((destroy_reason_t)(cell->payload(0))));
-	delete cell;
+	delete_cell(cell);
 	return 0;
       }
 
@@ -1051,7 +1088,7 @@ public:
 	    LOG_WARN("RECOGNISED node %d\n",i);
 	    if (!cell->build_relaycell_from_payload(last_digest,nodes[i]->skin)) {
 	      LOG_WARN("ReadData error on rebuilding RELAY cell informations from exit node, invalid response cell.\n");
-	      delete cell;
+	      delete_cell(cell);
 	      return 0;
 	    }
 	    LOG_INFOVV("Command %s streamid:%x\n", cell->command_str(),cell->stream_id);
@@ -1059,7 +1096,7 @@ public:
 
 	    if (cell->relay_command == cell_relay_command_t::RELAY_TRUNCATE || cell->relay_command == cell_relay_command_t::RELAY_TRUNCATED) { 
 	      LOG_WARN("Read received RELAY_TRUNCATE / RELAY_TRUNCATED, reason = %s\n", relay_truncated_reason_str((destroy_reason_t)(cell->payload(0))));
-	      delete cell;
+	      delete_cell(cell);
 	      return 0;
 	    }
 	    
@@ -1071,7 +1108,7 @@ public:
 	auto ret = cell->is_recognized(nodes[num-1]->skin);
 	if (ret!=1) {
 	  LOG_WARN("Cell has not been recognized, failure.\n");
-	  delete cell;
+	  delete_cell(cell);
 	  return 0;
 	}
       }
@@ -1081,13 +1118,13 @@ public:
       // Verification passed, now build cell informations
       if (!cell->build_relaycell_from_payload(last_digest,*skin)) {
 	LOG_WARN("Error on rebuilding RELAY cell informations from exit node, invalid cell.\n");
-	delete cell;
+	delete_cell(cell);
 	return 0;
       }
 
       if (cell->relay_command != cell_relay_command_t::RELAY_EXTENDED2) {
 	LOG_WARN("Expected EXTENDED2 but received %s\n", relay_cell_command_str(cell->relay_command));
-	delete cell;
+	delete_cell(cell);
 	return 0;
       }
 
@@ -1097,13 +1134,13 @@ public:
       if (!nodes[num]->finish_handshake(cell->const_payload(),cell->size)) {
 	LOG_WARN("Error on concluding EXTENDED2 handshake with exit!\n");
 	// Always destroy if fails
-	delete cell;
+	delete_cell(cell);
 	return 0;
       }
 
       LOG_INFOVV("EXTENDED2 Success, circuit has now a new hop\n");
 
-      delete cell;
+      delete_cell(cell);
       build_status=BS_EXTENDED2;
 	
       return 1;
@@ -1120,16 +1157,16 @@ protected:
   {
     int r=continue_build_circuit(cell,time);
     if(r==0) {
-      LOG_WARN("continue_build_circuit failed\n");
+      LOG_WARN("continue_build_circuit failed (was %d %s)\n",int(build_status),BS_ENUM_STRING[build_status]);
       set_status(BS_FAIL);
       destroy_circuit();
       bar_build.kill();
       if(ncb)
-	ncb(CB_CIRCUIT_BUILT_FAIL);
+	ncb(CCB_CIRCUIT_BUILT_FAIL);
     }
     if(build_status==BS_BUILT) {
       if(ncb)
-	ncb(CB_CIRCUIT_BUILT_OK);
+	ncb(CCB_CIRCUIT_BUILT_OK);
     }
   }
 
@@ -1143,9 +1180,33 @@ protected:
   }
   
 public:
-  void cb_cell(cell_t *c,cb_type_t type,int time)
+  void cb_cell(cell_t *c,mcb_type_t type,int time)
   {
     cb_lock();
+
+    if(type==MCBT_END) {
+      LOG_INFOV("CB CELL END\n");
+      if(build_status<BS_BUILT) {
+	set_status(BS_FAIL);
+	destroy_circuit();
+	bar_build.kill();
+	if(ncb)
+	  ncb(CCB_CIRCUIT_BUILT_FAIL);
+      } else {
+	destroy_circuit();
+      }
+      cb_unlock();
+      return;
+    } 
+
+    if(type==MCBT_CONNECT) {
+      LOG_INFOV("CB CELL CONNECT\n");
+      cb_cell_build(NULL,0);
+      cb_unlock();
+      return;
+    } 
+
+
     if(type==MCBT_START) {
       LOG_INFO("CB CELL START\n");
       //assert(build_status==BS_START_CONNECT);
@@ -1156,16 +1217,32 @@ public:
 
     if(type==MCBT_PING) {
       LOG_DEBUGV("ping time=%d ms\n",time);
+      if(build_status<BS_PROTO_START) {
+	LOG_WARN("timout in early stage\n");
+	set_status(BS_FAIL);
+	destroy_circuit();
+	bar_build.kill();
+	if(ncb)
+	  ncb(CCB_CIRCUIT_BUILT_FAIL);
+	return;
+      }
     } 
 
     if(build_status==BS_FAIL) {
       if(c)
-	delete c;
+	delete_cell(c);
       cb_unlock();
       return;
     }
     
     if(build_status>=BS_PROTO_START && build_status<BS_BUILT) {
+
+      if (c && c->command == cell_command_t::PADDING) {
+	delete_cell(c);
+	cb_unlock();
+	return;
+      }
+
       cb_cell_build(c,time);
       cb_unlock();
       return;
@@ -1180,7 +1257,6 @@ public:
 
   bool write_data(const cell_relay_command_t& command, const vector<unsigned char>& data,int sid=0) {
     return write_data(command,data.data(),data.size(),sid);
-
   }
   
   mutex_t send_mutex;
@@ -1211,7 +1287,7 @@ public:
 	digests.push_back(digest);
       }
       if(window_out<0) {
-	printf("window_out <0 : destroy !!!\n");
+	printf("window_out <0 : destroy !\n");
 	destroy_circuit();
       }
     }
@@ -1225,7 +1301,10 @@ public:
       cell->encrypt(nodes[i]->skin);
     }
     
-    cell->send_cell(sock);
+    if(!send_cell(cell)) {
+      destroy_circuit();
+      return 0;
+    }
 
     send_mutex.unlock();
 
@@ -1253,19 +1332,21 @@ public:
   }
 
   unsigned int new_stream_id() {
-    int r=random_short()%30000;
+    int r=1+random_short()%30000;
     for(int i=0;i<30000;i++) {
       if(streams.find(r)==streams.end()) return r;
       r=r+1;
-      if(r==30000) r=1;
+      if(r>=30000) r=1;
     }
     return 0;
   }
 
-  int stream_start(const string& hostname, const short& port,stream_callback_t cb) {
-    int stream_id=new_stream_id();
+  int stream_start(const string& hostname, const short& port,stream_callback_t cb,int stream_id=0) {
+    if(stream_id<=0)
+      stream_id=new_stream_id();
 
     if(stream_id==0) {
+      LOG_WARN("stream_id=0\n");
       return 0;
     }
 
@@ -1362,7 +1443,9 @@ public:
   void send_padding() {
     if (build_status==BS_BUILT && last_sent_padding + 10 < get_unix_time()) { //send padd every 10 secs
       auto cell = new cell_t_small(link_protocol_version, circuit_id, cell_command_t::PADDING);
-      cell->send_cell(sock);
+      if(!send_cell(cell)) {
+	destroy_circuit();
+      }
       
       last_sent_padding = get_unix_time();
     }
@@ -1375,41 +1458,20 @@ public:
     string host;
     int port;
   };
-  
+
   list<relay_begin_t*> relay_begins;
-  condvar_t condvar_relay_begin;
-  
-  void push_relay_begin(unsigned short sid,const char* host,int port) {
+
+  void new_got_relay_begin(unsigned short sid,const char* host,int port) {
     mut_relay_begin.lock();
     relay_begin_t *r=new relay_begin_t;
     r->stream_id=sid;
     r->host=host;
     r->port=port;
     relay_begins.push_back(r);
-    condvar_relay_begin.broadcast();
-    mut_relay_begin.unlock();
+    mut_relay_begin.unlock(); 
+    if(ncb)
+      ncb(CCB_RELAY_BEGIN);
   }
-  
-  const relay_begin_t* listen(int timeout=1000) {
-    mut_relay_begin.lock();
-
-    if(build_status!=BS_BUILT)
-      LOG_WARN("build_status!=BS_BUILT\n");
-    
-    while(build_status==BS_BUILT) {
-      if(!relay_begins.empty()) {
-	auto r=relay_begins.front();
-	mut_relay_begin.unlock();
-	return r;
-      }
-      int r=condvar_relay_begin.timedwait(mut_relay_begin,timeout);
-      if(r==false)
-	break;
-    }
-    mut_relay_begin.unlock();
-    return NULL;
-  }
-
 
   void relay_end(int sid,int reason=0) {
     vector<unsigned char> pay;
@@ -1438,17 +1500,22 @@ public:
     */
   }
   
-  int accept(stream_callback_t cb=NULL) {
+  int accept(stream_callback_t cb,int *prtid=NULL) {
     mut_relay_begin.lock();
-    assert(!relay_begins.empty());
+    if(relay_begins.empty()) {
+      LOG_WARN("nothing to accept()\n");
+      relay_begins.pop_front();
+      return -1;
+    }
     auto r=relay_begins.front();
     relay_begins.pop_front();
     mut_relay_begin.unlock();
-    auto stream_id=r->stream_id;
+    int stream_id=r->stream_id;
     delete r;
     if(cb) {
       streams[stream_id].init(this,stream_id);
       streams[stream_id].set_ncb(cb);
+      if(prtid) *prtid=stream_id; //not nice...
       streams[stream_id].relay_begin();
       return stream_id;
     } else {
@@ -1458,7 +1525,7 @@ public:
   }
 
   void reject() {
-    accept();
+    accept(NULL);
   }
   
   
@@ -1544,7 +1611,6 @@ public:
 	set_status(BS_DESTROY);
       }
       
-      
 
       int sid=cell->stream_id;
       if(sid>0) {
@@ -1552,6 +1618,7 @@ public:
 	
 	if(it==streams.end()) {
 	  if(cell->relay_command == cell_relay_command_t::RELAY_BEGIN) {
+	    LOG_INFO("got relay_begin for a new stream_id=%x\n",sid);
 	    bool ok=1;
 	    int l=strnlen((const char*)cell->const_payload(),cell->size);
 	    if(cell->const_payload()[l]!=0)
@@ -1560,7 +1627,7 @@ public:
 	      l++;
 	      char tmp[l];
 	      memcpy(tmp,(const char*)cell->const_payload(),l);
-	      LOG_INFOV("got relay_begin %x '%s'\n",sid,tmp);
+	      LOG_INFO("got relay_begin stream_id=%x '%s'\n",sid,tmp);
 	      string host;
 	      int port=-1;
 	      for(int i=0;i<l;i++)
@@ -1572,8 +1639,10 @@ public:
 		}
 	      if(port<0)
 		ok=0;
-	      else
-		push_relay_begin(sid,host.c_str(),port);
+	      else {
+		//old_got_relay_begin(sid,host.c_str(),port);
+		new_got_relay_begin(sid,host.c_str(),port);
+	      }
 	    }
 	    if(!ok) {
 	      LOG_WARN("problem in RELAY_BEGIN stream_id=%x\n",sid);
@@ -1603,7 +1672,8 @@ public:
 	    auto r=process_introduce2(cell->const_payload(),cell->size);
 	    if(r) {
 	      intro2_ok.push_back(r);
-	      //TODO callback
+	      if(ncb)
+		ncb(CCB_INTRO2);
 	    }
 	    else
 	      printf("error in process introduce2\n");
@@ -1649,12 +1719,16 @@ public:
 	}
 
 	if (cell->relay_command == cell_relay_command_t::RELAY_COMMAND_RENDEZVOUS_ESTABLISHED) {
+	  if(ncb)
+	    ncb(CCB_RENDEZVOUS_ESTABLISHED);
 	  rendezvous_ok=1;
 	  goto process_cell_ok;
 	}
 
 	if (cell->relay_command == cell_relay_command_t::RELAY_COMMAND_INTRO_ESTABLISHED) {
 	  LOG_INFOV("RELAY_COMMAND_INTRO_ESTABLISHED\n");
+	  if(ncb)
+	    ncb(CCB_INTRO_ESTABLISHED);
 	  intro_ok=1;
 	  goto process_cell_ok;
 	}
@@ -1683,10 +1757,10 @@ public:
   process_cell_destroy:
     destroy_circuit();
   process_cell_ko:
-    delete cell;
+    delete_cell(cell);
     return false;
   process_cell_ok:
-    delete cell;
+    delete_cell(cell);
     return true;
   }
     
@@ -1869,7 +1943,7 @@ public:
       memcpy(enc.data(),p,s-32);
       memcpy(mac,p+s-32,32);
       
-      LOG_DEBUG("process intro2 mac ",mac,32);
+      //LOG_DEBUG("process intro2 mac ",mac,32);
 
       const char *protoid="tor-hs-ntor-curve25519-sha3-256-1";
       
@@ -1891,7 +1965,7 @@ public:
 
       //public_key=exp([9],x);  
       //EXP(B,x) = exp(public_key,b);
-      LOG_DEBUG("public_key ",mat->public_key, 32);
+      //LOG_DEBUG("public_key ",mat->public_key, 32);
 
       c25519_smult(tmp, mat->public_key, mat->intro_keys->enc.secret_key);
 
@@ -1920,7 +1994,7 @@ public:
       sha3_ctx_t ctx;
       shake256_init(&ctx);
 
-      LOG_DEBUG("secret_hs_input : ",secret_hs_input.data(),secret_hs_input.size());
+      //LOG_DEBUG("secret_hs_input : ",secret_hs_input.data(),secret_hs_input.size());
 
       shake_update(&ctx,secret_hs_input.data(),secret_hs_input.size());
 
@@ -1929,7 +2003,7 @@ public:
       unsigned char derived[64];
       shake_out(&ctx, derived, 64); 
 
-      LOG_DEBUG("derived keys : ",derived,64);
+      //LOG_DEBUG("derived keys : ",derived,64);
 
       unsigned char ENC_KEY[32];
       unsigned char MAC_KEY[32];
@@ -1941,7 +2015,7 @@ public:
       
       MAC_SHA3(cmac,MAC_KEY,32,pp,ss-32);
       
-      LOG_DEBUG("comp MAC ",cmac,32);
+      //LOG_DEBUG("comp MAC ",cmac,32);
 
     
       mbedtls_cipher_init( &cipher_ctx );
@@ -1991,7 +2065,7 @@ public:
 	PAD        (optional padding)              [up to end of plaintext]
       */
 
-      LOG_DEBUG("dec ",enc.data(),enc.size());
+      //LOG_DEBUG("dec ",enc.data(),enc.size());
 
       unsigned char *p2=enc.data();
       int s2=enc.size();
@@ -2055,7 +2129,7 @@ public:
     payload.push_back(0);
     payload.push_back(32);
 
-    LOG_DEBUG("auth_key",intro_node.auth_key,32);
+    //LOG_DEBUG("auth_key",intro_node.auth_key,32);
 
     memcpy(rdv_material.AUTH_KEY,intro_node.auth_key,32);
     memcpy(rdv_material.B,intro_node.enc_key_c,32);
@@ -2143,7 +2217,7 @@ public:
 
       ed25519_prepare(rdv_material.private_key);
       c25519_smult(rdv_material.public_key, c25519_base_x, rdv_material.private_key);
-      LOG_DEBUG("pub_key ",rdv_material.public_key,32);
+      //LOG_DEBUG("pub_key ",rdv_material.public_key,32);
 
       
       //hs_keys = KDF(intro_secret_hs_input | t_hsenc | info, S_KEY_LEN+MAC_LEN)
@@ -2176,7 +2250,7 @@ public:
       sha3_ctx_t ctx;
       shake256_init(&ctx);
 
-      LOG_DEBUG("secret_hs_input : ",secret_hs_input.data(),secret_hs_input.size());
+      //LOG_DEBUG("secret_hs_input : ",secret_hs_input.data(),secret_hs_input.size());
       
       shake_update(&ctx,secret_hs_input.data(),secret_hs_input.size());
 
@@ -2185,7 +2259,7 @@ public:
       unsigned char derived[dl];
       shake_out(&ctx, derived, dl); 
 
-      LOG_DEBUG("derived keys : ",derived,dl);
+      //LOG_DEBUG("derived keys : ",derived,dl);
 
       unsigned char ENC_KEY[32];
       unsigned char MAC_KEY[32];
@@ -2215,7 +2289,7 @@ public:
       append(payload,rdv_material.public_key,32);
 
       append(payload,encrypted.data(),encrypted.size());
-      LOG_DEBUG("enc data ",encrypted.data(),encrypted.size());
+      //LOG_DEBUG("enc data ",encrypted.data(),encrypted.size());
       
       /*
 	Instantiate MAC(key=k, message=m) with H(k_len | k | m),
@@ -2227,8 +2301,8 @@ public:
       MAC_SHA3(MAC,MAC_KEY,32,payload.data(),payload.size());
 
       append(payload,MAC,32);
-      LOG_DEBUG("MAC ",MAC,32);
-
+      //LOG_DEBUG("MAC ",MAC,32);
+      
       mbedtls_cipher_free( &cipher_ctx );
 
     }
@@ -2554,17 +2628,22 @@ public:
     return 1;
   }
 
-  
-  void establish_rendezvous(rdv_material_t &rdv_material) {
+  void establish_simple_rendezvous(unsigned char *rdvc) {
+    int stream_id=new_stream_id();
+    write_data(cell_relay_command_t::RELAY_COMMAND_ESTABLISH_RENDEZVOUS,rdvc,20,stream_id);
+    streams[stream_id];
+  }
 
+  void establish_rendezvous(rdv_material_t &rdv_material) {
     this->rdv_material=&rdv_material;
     int stream_id=new_stream_id();
     write_data(cell_relay_command_t::RELAY_COMMAND_ESTABLISH_RENDEZVOUS,rdv_material.rdvc,20,stream_id);
     streams[stream_id];
   }
 
-  int begin_dir(stream_callback_t cb=NULL) {
-    int stream_id=new_stream_id();
+  int begin_dir(stream_callback_t cb,int stream_id=0) {
+    if(stream_id<=0)
+      stream_id=new_stream_id();
     LOG_INFOVV("stream_id=%d\n",stream_id);
     if(stream_id==0) {
       LOG_SEVERE("stream_id = 0 !\n");
@@ -2623,6 +2702,7 @@ public:
   
   
   int resolve(const string& hostname, in_addr &resolved,int timelimit=10*1000) { //timelimit in ms
+    LOG_WARN("TODO make tor resolve async!\n");
     int i=stream_resolve(hostname);
     if(i==0) {
       LOG_SEVERE("stream_id = 0 \n");
@@ -2656,15 +2736,18 @@ public:
     }
     s+=string("web");
 
-    LOG_INFO("Circuit: | bs=%d | %s\n",build_status,s.c_str());
+    LOG_INFO("Circuit: | bs=%d %s | %s\n",build_status,BS_ENUM_STRING[build_status],s.c_str());
   }
 
 };
   
 
-bool fill_nodes(circuit_t *tc,info_node_t *exit=NULL) {
-  mutex_dir.lock();
+bool fill_nodes(circuit_t *tc,info_node_t *exit=NULL,bool intro=0,int *id=NULL) {
+  if(!tor_is_ok())
+    LOG_WARN("fill_node when tor.status != OK !\n");
 
+  mutex_dir.lock();
+  
   int tofill=tc->Nnodes;
   if(exit) tofill--;
     
@@ -2686,6 +2769,7 @@ bool fill_nodes(circuit_t *tc,info_node_t *exit=NULL) {
 	break;
       }
       int r=sr.pick();
+      LOG_DEBUG("try node %d for i=%d\n",r,i);
       assert(r>=0 && r<MAX_NODES);
       if(relays.nodes[ii][r].is_ok()==0) continue;
       tc->nodes[i]=new relay_t(relays.nodes[ii][r]);
@@ -2706,9 +2790,11 @@ bool fill_nodes(circuit_t *tc,info_node_t *exit=NULL) {
       if(cache_descs[r].is_ok()==0) continue;
       if(cache_descs[r].in_consensus()==0) continue;
       if(ii==0 && cache_descs[r].can_be_guard()==false) continue;
+      if(ii==2 && intro) ii=1;
       if(ii==2 && cache_descs[r].can_be_exit()==false) continue;
       if(ii==1 && cache_descs[r].can_be_middle()==false) continue;
       tc->nodes[i]=new relay_t(cache_descs[r]);
+      if(i==tc->Nnodes-1 && id) (*id)=r;
       break;
     }
 #endif
@@ -2733,7 +2819,10 @@ circuit_t *gen_working_circuit(info_node_t *exit,int max=30,int max2=3) {
   circuit_t *tc=NULL;
   int j=0;
   for(int i=0;i<max && j<max2 && tc==NULL;) {
-    tc=new circuit_t("gen_working_circuit");
+    tc=new circuit_t();
+#ifdef DBGPOLL
+    tc->name="gwc";
+#endif
     j++;
     int r=fill_nodes(tc,exit);
     if(!r) {
@@ -2744,7 +2833,8 @@ circuit_t *gen_working_circuit(info_node_t *exit,int max=30,int max2=3) {
       sleep(1);
       continue;
     }
-    tc->print_circuit_info();
+    if(main_dbg>=_LOG_INFOV)
+      tc->print_circuit_info();
     tc->build_circuit();
     if(tc->firstconnection)
       i++;
@@ -2761,70 +2851,51 @@ circuit_t *gen_working_circuit(int m=30) {
   return gen_working_circuit(NULL,m,m);
 }
 
-
+#define SOCK_TOR_ERROR -50
 #define SOCK_CONNECT_TOR_BUILD -51
 #define SOCK_CONNECT_TOR_NOT_BUILT -52
 #define SOCK_CONNECT_TOR_STREAM_TIMEOUT -53
 #define SOCK_CONNECT_TOR_STREAM_START -54
 #define SOCK_CONNECT_TOR_RESOLVE -55
 
-class socket_tor_t : public socket_t {
-  bool resources_ready=0;
-  bool manage_circuit=1;
+class asocket_tor_t : public asocket_t {
   int stream_id=0;
   circuit_t *tc=NULL;
-  cvector_t<unsigned char,4096> *buff;
 
-  void log(const char *file,const char *fn,int line,int lvl, const char* format, ... )
+  void log(const char *file,const char *fn,int line,int lvl, const char* format, ... ) const 
   {
     if(lvl>dbg) return;
     va_list arglist;
     
-    printf("[%s][socket_tor %p :: %s:%d] ",loglvlstr[lvl],this,fn,line);
+    printf("[%s][asocket_tor %p :: %s:%d] ",loglvlstr[lvl],this,fn,line);
     va_start( arglist, format );
     vprintf( format, arglist );
     va_end( arglist );
   }
 
 public:  
+  asocket_tor_t(circuit_t *tc2) {
+    tc=tc2;
+  }
+
+  virtual void disconnect() {
+    if(tc && stream_id>0 && tc->streams.find(stream_id)!=tc->streams.end()) {
+      tc->streams[stream_id].finish();
+      tc->streams[stream_id].set_ncb(NULL);
+      stream_id=0;
+    }
+  }
+  
+  ~asocket_tor_t() {
+    //disconnect();
+  }
+  
   relay_t* get_exit_node() {
     if(tc==NULL) return NULL;
     return tc->get_exit_node();
   }
-  socket_tor_t() {
-  }
 
-  socket_tor_t(circuit_t *tc2) {
-    tc=tc2;
-    manage_circuit=0;
-  }
 
-  bool setup_dir(circuit_t *tc2,int sid) {
-    assert(tc2);
-    assert(sid);
-
-    tc=tc2;
-    manage_circuit=0;
-    stream_id=sid;
-
-    setup_resources();
-
-    if(tc->build_status!=circuit_t::BS_BUILT) {
-      LOG_WARN("setup_dir: circuit not built !\n");
-      return 0;
-    }
-
-    return 1;
-  }
-
-  ~socket_tor_t() {
-    if(tc && stream_id>0) {
-      tc->streams[stream_id].finish();
-      tc->streams[stream_id].set_ncb(NULL);
-    }
-    release_resources();
-  }
-  
   bool is_connected() const {
     if(tc==NULL || tc->build_status!=circuit_t::BS_BUILT) return false;
     if(stream_id==0) return false;
@@ -2833,128 +2904,75 @@ public:
     return true;
   }
 
-  void setup_resources(info_node_t *exit=NULL) {
-    if(resources_ready) 
-      release_resources();
-
-    buff=new cvector_t<unsigned char,4096>();
-    
-    if(manage_circuit) {
-      tc=gen_working_circuit(exit);
-    } else {
-      assert(exit==NULL);
-    }
-    
-    resources_ready = true;
-  }
-
-  void release_resources() {
-    if(manage_circuit && tc) {
-      tc->destroy_circuit();
-      delete tc;
-      tc=NULL;
-    }
-
-    delete buff;
-    buff=NULL;
-    
-    resources_ready = false;
-  }
-
-  mutex_t mut;
-  condvar_t cond_write,cond_read;
-
   void callback(const unsigned char *t,int l)
   {
-    assert(buff);
-    if(t==NULL) { //special
-      if(l==CB_RELAY_END) {//end of connection
-	cond_write.broadcast();
-	return;
-      }
-      if(l==CB_RELAY_BEGIN) { //connected
-	cond_connected.broadcast();
-	return;
-      }
-      ::LOG_FATAL("special not handled...\n");
-      assert(0);
+    if(t==NULL && l==CCB_RELAY_BEGIN) { //connected
+      if(ncb)
+	ncb(NULL,ASCB_CONNECTED);
+      return;
     }
-    mut.lock();
-    while(buff->left()<l)
-      cond_read.wait(mut);
-      
-    buff->push_back(t,l);
-    cond_write.broadcast();
-    mut.unlock();
+    assert(ncb);
+    if(t==NULL) { //special
+      if(l==CCB_RELAY_END || l==CCB_STREAM_DESTROYED) {//end of connection
+	ncb(NULL,ASCB_DISCONNECTED);
+	return;
+      }
+      LOG_FATAL("special %d not handled...\n",l);
+    }
+    ncb(t,l);
   }
 
-
-  condvar_t cond_connected;
-  mutex_t mut_connected;
-
-  int wait_connected(int to=10*1000) {
-    mut_connected.lock();
-    while(1) {
-      int r=cond_connected.timedwait(mut_connected,to);
-      if(!r) {
-	mut_connected.unlock();
-	return 0;
-      }
-      if(tc->streams[stream_id].connected==false) continue;
-      break;
+  bool setup_dir(circuit_t *tc2,int sid) {
+    assert(tc2==tc);
+    assert(sid>0);
+    if(tc->build_status!=circuit_t::BS_BUILT) {
+      LOG_WARN("setup_dir: circuit not built !\n");
+      return 0;
     }
-    mut_connected.unlock();
+    stream_id=sid;
+
     return 1;
   }
 
-  int connect_dir_and_wait(info_node_t *n) {
-    assert(n);
-    assert(manage_circuit);
-    setup_resources(n);
+  void begin_dir() {
+    assert(tc);
+    int sid=tc->new_stream_id();
+    if(sid<=0)
+      LOG_WARN("sid=%d\n",sid);
 
-    if(tc==NULL || tc->build_status!=circuit_t::BS_BUILT) {
-      LOG_WARN("circuit not built\n");
-      return SOCK_CONNECT_TOR_BUILD;
-    }
+    stream_id=sid;
 
-    stream_id=tc->begin_dir(std::bind(&socket_tor_t::callback,this,std::placeholders::_1,std::placeholders::_2));
+    int r=tc->begin_dir(std::bind(&asocket_tor_t::callback,this,std::placeholders::_1,std::placeholders::_2),sid);
+    if(r!=sid)
+      LOG_WARN("something wrong in begin_dir(sid=%d) = %d\n",sid,r); 
 
-    if(stream_id==0) {
-      LOG_WARN("begin_dir fail\n");
-      return SOCK_CONNECT_TOR_STREAM_START;
-    }
-    
-    return wait_connected(10*1000);
   }
+
   
+
+
   int accept() {
-    setup_resources();
-    assert(0==manage_circuit);
     if(tc->build_status!=circuit_t::BS_BUILT) {
       LOG_WARN("circuit not built\n");
       return SOCK_CONNECT_TOR_NOT_BUILT;
     }
-    stream_id=tc->accept(std::bind(&socket_tor_t::callback,this,std::placeholders::_1,std::placeholders::_2));
+    
+    int r=tc->accept(std::bind(&asocket_tor_t::callback,this,std::placeholders::_1,std::placeholders::_2),&stream_id);
 
-    if(stream_id<=0) return 0;
-
+    if(r<=0) return 0;
+    assert(r==stream_id);
     return 1;
   }
     
   int connect(const string &host, const short port) {
-    setup_resources();
 
-    if(manage_circuit) {
-
-    } else {
-      if(tc->build_status!=circuit_t::BS_BUILT) {
-	LOG_WARN("circuit not built\n");
-	return SOCK_CONNECT_TOR_NOT_BUILT;
-      }
+    if(tc->build_status!=circuit_t::BS_BUILT) {
+      LOG_WARN("circuit not built\n");
+      return SOCK_CONNECT_TOR_NOT_BUILT;
     }
 
     if(host.size() && !is_ipv4_address(host)) {
-      LOG_INFOVV("resolve...\n");
+      LOG_INFOVV("resolve... (TODO ASYNC !) \n");
       in_addr res;
       auto r=tc->resolve(host,res);
       if(!r) {
@@ -2962,22 +2980,17 @@ public:
 	return SOCK_CONNECT_TOR_RESOLVE;
       }
       LOG_INFOVV("resolve ok\n");
-      stream_id=tc->stream_start(res, port,std::bind(&socket_tor_t::callback,this,std::placeholders::_1,std::placeholders::_2));
-    }
-    else {
-      stream_id=tc->stream_start("", port,std::bind(&socket_tor_t::callback,this,std::placeholders::_1,std::placeholders::_2));
+      stream_id=tc->stream_start(res, port,std::bind(&asocket_tor_t::callback,this,std::placeholders::_1,std::placeholders::_2));
+    } else {
+      stream_id=tc->stream_start(host, port,std::bind(&asocket_tor_t::callback,this,std::placeholders::_1,std::placeholders::_2));
     }
 
     if(stream_id==0) {
       LOG_WARN("stream_start fail\n");
       return SOCK_CONNECT_TOR_STREAM_START;
     }
-    
-    return wait_connected(10*1000);
-  }
 
-  void disconnect() {
-
+    return SOCK_OK;
   }
 
   int write(const unsigned char *data,int len) {
@@ -2996,77 +3009,8 @@ public:
     return o;
   }
 
-  virtual int read(unsigned char *data,int maxlen) {
-    LOG_DEBUG("sock_tor : read maxlen: %d timeout=%d\n",maxlen,timeout);
-
-    int re=0;
-    assert(buff);
-    unsigned long long st=timer_get_ms();
-    mut.lock();
-
-    while(1) {
-      re=buff->read(data,maxlen);
-      LOG_DEBUG("buff->read re=%d\n",re);
-      assert(re>=0);
-      if(re) {
-	mut.unlock();
-	cond_read.broadcast();
-	return re;
-      }
-      
-      assert(re==0);
-      if(tc->streams[stream_id].connected==false || tc->streams[stream_id].finished) {
-	mut.unlock();
-	LOG_DEBUG("sock_tor ret SOCK_CLOSED connected=%d finished=%d\n",tc->streams[stream_id].connected,tc->streams[stream_id].finished);
-	return SOCK_CLOSED;
-      }
-      long long t=timer_get_ms()-st;
-      t=timeout-t;
-      LOG_DEBUG("sock_tor read timeleft %d\n",int(t));
-      if(t<=0) {
-	LOG_DEBUG("ret timeout\n");
-	mut.unlock();
-	return SOCK_TIMEOUT;
-      }
-      
-      cond_write.timedwait(mut,t);
-      //LOG_DEBUG("wait data... re=%d t=%d %d\n",re,t,get_timeout());
-    }
-      
-    return re;
-  }
-
-  virtual int write(const string &s) {
-    return write((const unsigned char*)s.c_str(),s.size());
-  }
-
 };
 
-string get_tor_ip(const string &host) {
-  socket_tor_t *sock=new socket_tor_t();
-  sock->set_timeout(10*1000+43);
-  auto r=get_ip(host,sock,80);
-  delete sock;
-  return r;
-}
-
-
-string get_tor_ip_tls(const string &host) {
-  socket_tor_t *stor=new socket_tor_t();
-  socket_tls_t *stls=new socket_tls_t();
-  stls->set_timeout(10*1000+44);
-  stor->set_timeout(10*1000+45);
-  stls->setsock(*stor);
-  
-  stor->connect(host,443); //todo check error
-  stls->connect(host,443); //todo check error
-  
-  printf("connected\n");
-  auto r=get_ip_2(host,stls);
-  delete stls;
-  delete stor;
-  return r;
-}
 
 mutex_t mut_dead_circuits;
 set<circuit_t*> dead_circuits;
@@ -3075,6 +3019,11 @@ void clean_delete_circuit(circuit_t *tc)
 {
   LOG_DEBUG("clean_delete_circuit(%p)\n",tc);
   if(!tc) return;
+  tc->destroy_circuit();
+  tc->set_ncb(NULL);
+  assert(tc->poller==NULL);
+  //if(tc->poller)    tc->poller->unreg(*tc);
+  tc->poller=NULL;
   mut_dead_circuits.lock();
   dead_circuits.insert(tc);
   mut_dead_circuits.unlock();
@@ -3092,7 +3041,10 @@ void clean_delete_circuit()
 }
 
 
-struct circuits_t {
+#ifndef NOCIRCUITS
+
+struct circuits_t :  public union_poller_t
+{
   enum status_t {
     NONE,
     WAIT,
@@ -3100,92 +3052,103 @@ struct circuits_t {
     OK_CONNECTED,
     OK_JOB,
 
-    FAIL_CONNECTED_EARLY,
     FAIL_CONNECTED,
+    FAIL_CONNECTED_RETRY,
     FAIL_JOB,
 
     DESTROYED,
   } ;
 
-  virtual bool is_working() const {
-    for(auto &it:circuits)
-      if(it->status==WAIT) return 1;
-    return 0;
-  }
-
-  string name="noname";
 
   struct cs_t {
-#ifdef MEMDBG
+#ifdef MEMDBGSUB
     void * operator new(size_t size)
     {
-      void * p = malloc(size);
-      _mn[p]=size;
-      printf("*** cs_t::new %p size=%d\n",p,int(size));
+      void * p = malloc(size);//MEMDBG
+      printf("*** new cs_t %p size=%d\n",p,int(size));
       return p;
     }
     
     void operator delete(void * p)
     {
-      auto size=_mn[p];
-      printf("*** cs_t::delete %p size=%d\n",p,int(size));
-      memset(p,0x42,size);
-      _mn.erase(p);
-      //free(p);
+      printf("*** delete cs_t %p \n",p);
+      free(p);
     }
 #endif
-    int cbs=0;
+
+    void log(const char *file,const char *fn,int line,int lvl, const char* format, ... ) const 
+    {
+      if(lvl>ptrcircuits->dbg) return;
+      va_list arglist;
+      
+      printf("[%s][circuits %p :: %s:%d ] ",loglvlstr[lvl],this,fn,line);
+      va_start( arglist, format );
+      vprintf( format, arglist );
+      va_end( arglist );
+    }
 
     void clear() {
       cbs=0;
-      exit=0;
+      exit=NULL;
       status=NONE;
       tc=NULL;
       i=0;j=0;
     }
     
+    short cbs=0;
+    short fails=0;
     circuits_t *ptrcircuits=NULL;
-    int k=-1;
     info_node_t *exit=NULL;
     status_t status=NONE;
     circuit_t *tc=NULL;
-    int i=0,j=0; //tries
-
+    short k=-1;
+    short orig=-1;
+    short i=0,j=0; //tries
+    long long connect_time=0;
+    
     ~cs_t() {
       LOG_INFOV("~circuits_t():cs %p\n",this);
     }
     
-    cs_t(int kk) {
+    cs_t(circuits_t *pt,int kk):ptrcircuits(pt) {
       LOG_INFOV("circuits_t():cs %p kkid=%d\n",this,kk);
       k=kk;
     }
 
-    
     circuit_t * gen() {
+      bool intro=ptrcircuits->intro;
       auto otc=tc;
-      char tmp[20];
-      snprintf(tmp,19," id=%d ",k);
-      tc=new circuit_t("circuits gen "+ptrcircuits->name+string(tmp));
+      tc=new circuit_t(*ptrcircuits);
+      tc->dbg=ptrcircuits->dbg_sub;
+#ifdef DBGPOLL
+      char tmp[10];
+      snprintf(tmp,10," %d",k);
+      tc->name=ptrcircuits->name+string(tmp);
+#endif
 
       LOG_INFOV("circuits_t():cs::gen %p kid=%d tc=%p->%p\n",this,k,otc,tc);
       j++;
-      int r=fill_nodes(tc,exit);
+      int id=-1;
+      int r=fill_nodes(tc,exit,intro,&id);
       if(!r) {
 	LOG_INFO("circuits_t::cs %p kid=%d fill_nodes fails...\n",this,k);
-	status=FAIL_CONNECTED_EARLY;
+	status=FAIL_CONNECTED;
 	ptrcircuits->done(k,status);
 	delete tc;
 	tc=NULL;
       } else {
-	LOG_INFO("circuits_t::cs %p kid=%d trying to build circuit tc=%p :\n",this,k,tc);
-	tc->print_circuit_info();
+	if(id>=0)
+	  orig=id;
+	LOG_INFOV("circuits_t::cs %p kid=%d trying to build circuit tc=%p :\n",this,k,tc);
+	if(main_dbg>=_LOG_INFOV)
+	  tc->print_circuit_info();
 
 	tc->set_ncb(std::bind(&circuits_t::callback,ptrcircuits,this,std::placeholders::_1));
 	
 	r=tc->async_build_circuit();
 	if(r==0) {
 	  LOG_INFOVV("circuits_t::cs %p kid=%d async_build_circuit FAIL\n",this,k);
-	  status=FAIL_CONNECTED_EARLY;
+	  status=FAIL_CONNECTED;
 	  ptrcircuits->done(k,status);
 	  delete tc;
 	  tc=NULL;
@@ -3199,6 +3162,101 @@ struct circuits_t {
       LOG_INFO("curcuit %p (p:%p) status:%d\n",tc,ptrcircuits,int(status));
     }
   };
+
+
+#ifdef DBGPOLL
+  string name;
+#endif
+  short dbg=DBGBASE;
+  short dbg_sub=DBGBASE;
+
+  vector<cs_t*> circuits;
+  short max=30;
+  short max2=3;
+
+  char postdo=0;
+  
+
+  void log(const char *file,const char *fn,int line,int lvl, const char* format, ... ) const 
+  {
+    if(lvl>dbg) return;
+    va_list arglist;
+    
+    printf("[%s][circuits %p :: %s:%d ] ",loglvlstr[lvl],this,fn,line);
+    va_start( arglist, format );
+    vprintf( format, arglist );
+    va_end( arglist );
+  }
+
+  bool intro=0;
+  
+  virtual void pcallback(pollable_t **chain,poll_reg_t &fds) {
+    if(chain[0]==NULL) {
+      assert(fds.events==POLL_TIMEOUT);
+      for(auto &cs:circuits) {
+	auto t=timer_get_ms(); 
+	if(cs->status==OK_CONNECTED && t-cs->connect_time>TOR_JOB_TIMELIMIT) { //10 secs in hard
+	  LOG_WARN("timeout JOB\n");
+	  assert(cs->tc);
+	  clean_delete_circuit(cs->tc);
+	  cs->tc=NULL;
+	  cs->status=FAIL_JOB;
+	  done(cs->k,cs->status);
+	}
+      }
+      return;
+    }
+
+    assert(chain[0]);
+    chain[0]->pcallback(chain+1,fds);
+
+    if(postdo&1) {
+      LOG_INFOV("postdo something 1...\n");
+      postdo&=~1;
+      for(auto &cs:circuits) {
+	if(cs->status==FAIL_CONNECTED_RETRY) {
+	  if(cs->tc) {
+	    clean_delete_circuit(cs->tc);
+	    cs->tc=NULL;
+	  }
+	  if(cs->i<max && cs->j<max2) {
+	    cs->gen();
+	  } else {
+	    cs->status=FAIL_CONNECTED;
+	    done(cs->k,cs->status);
+	  }
+	}
+      }
+    } 
+
+  }
+
+
+  static const char *status_str(status_t s)
+  {
+    if(s==NONE) return "NONE";
+    if(s==WAIT) return "WAIT";
+    if(s==OK_CONNECTED) return "OK_CONNECTED";
+    if(s==OK_JOB) return "OK_JOB";
+    if(s==FAIL_CONNECTED) return "FAIL_CONNECTED";
+    if(s==FAIL_CONNECTED_RETRY) return "FAIL_CONNECTED_RETRY";
+    if(s==FAIL_JOB) return "FAIL_JOB";
+    if(s==DESTROYED) return "DESTROYED";
+    return "????";
+  }
+
+  virtual bool is_working() const {
+    for(auto &it:circuits)
+      if(it->status==WAIT || it->status==OK_CONNECTED || it->status==FAIL_CONNECTED_RETRY) {
+	int bs=0;
+	if(it->tc)
+	  bs=it->tc->build_status;
+	LOG_INFOV("circuit %p tc=%p is still working status=%d  bs=%d %s\n",it,it->tc,it->status,bs,BS_ENUM_STRING[bs]);
+	return 1;
+      }
+    return 0;
+  }
+
   
   virtual void done(int i,int ok) {
     circuits[i]->cbs=ok;
@@ -3210,40 +3268,35 @@ struct circuits_t {
       it->print();
   }
   
-  vector<cs_t*> circuits;
-  
-  int max=30;
-  int max2=3;
-    
   void destroy_all() {
     for(auto &it:circuits) {
-      if(it->tc)
+      if(it->tc) {
 	delete it->tc;
+	it->tc=NULL;
+      }
     }
   }
 
-  void callback(cs_t *cs,cb_t l) {
+  void callback(cs_t *cs,ccb_t l) {
     LOG_DEBUG("CB in circuits_t %p cs_t %p kid=%d cb %d\n",this,cs,cs->k,int(l));
-    if(l==CB_CIRCUIT_BUILT_FAIL) {
-      if(cs->tc) {
-	cs->tc->set_ncb(NULL);
-	clean_delete_circuit(cs->tc);
-      }
-      cs->tc=NULL;
-      if(cs->i<max && cs->j<max2) {
-	cs->gen();
-      } else {
-	cs->status=FAIL_CONNECTED;
-	done(cs->k,cs->status);
-      }
-    } else if(l==CB_CIRCUIT_BUILT_OK) {
+    if(l==CCB_CIRCUIT_BUILT_FAIL) {
+      cs->status=FAIL_CONNECTED_RETRY;
+      postdo|=1;
+    } else if(l==CCB_CIRCUIT_BUILT_OK) {
+      cs->connect_time=timer_get_ms();
       cs->status=OK_CONNECTED;
       done(cs->k,cs->status);
-    } else if(l==CB_DESTROY) {
+    } else if(l==CCB_DESTROY) {
       cs->status=DESTROYED;
       done(cs->k,cs->status);
+    } else if(l==CCB_INTRO2) {
+      postdo|=2;
+    } else if(l==CCB_INTRO_ESTABLISHED) {
+      postdo|=2;
+    } else if(l==CCB_RENDEZVOUS_ESTABLISHED) {
+      postdo|=2;
     } else {
-      never_here();
+      LOG_WARN("unhandled cb %d\n",l);
     }
   }
 
@@ -3255,7 +3308,7 @@ struct circuits_t {
 
     cs_t *cs=NULL;
     if(!circuits[k]) {
-      cs=new cs_t(k);
+      cs=new cs_t(this,k);
       circuits[k]=cs;
     } else {
       cs=circuits[k];
@@ -3263,7 +3316,6 @@ struct circuits_t {
     }
 
     if(circuits[k]->tc) {
-      circuits[k]->tc->set_ncb(NULL);
       clean_delete_circuit(circuits[k]->tc);
     }
     circuits[k]->tc=NULL;
@@ -3271,17 +3323,27 @@ struct circuits_t {
     
     cs->exit=exit;
     cs->status=WAIT;
-    cs->ptrcircuits=this;
-    
+
     cs->gen();
   }
 
+  circuits_t(poller_t &p) {
+    poller=&p;
+    poll_reg_t r;
+    r.events=POLL_TIMEOUT;
+    r.timeout=1000; //500 ms
+#ifdef DBGPOLL
+    r.name="cis";
+#endif
+    union_poller_t::pollable_t::reg(r);
+  }
+  
   virtual ~circuits_t() {
+    union_poller_t::pollable_t::unreg();
+
     LOG_INFOV("~circuits_t() %p\n",this);
     for(auto &it:circuits) {
       if(it) {
-	if(it->tc)
-	  it->tc->set_ncb(NULL);
 	clean_delete_circuit(it->tc);
 	delete it;
       }
@@ -3290,7 +3352,13 @@ struct circuits_t {
   
 };
 
-int publish_hs_descr(socket_t &sock,ip_info_node_t &dir,s_vc_t &a,ps_vector<char> &v)
+
+
+
+
+#ifndef DISABLE_CACHE
+
+int publish_hs_descr(asocket_t &sock,ip_info_node_t &dir,s_vc_t &a,ps_vector<char> &v)
 {
   LOG_INFOV("upload hs descriptor \n");
   
@@ -3314,94 +3382,56 @@ int publish_hs_descr(socket_t &sock,ip_info_node_t &dir,s_vc_t &a,ps_vector<char
   return DESCR_OK;
 }
 
-// int publish_hs_descr_and_wait(socket_t &sock,ip_info_node_t &dir,s_vc_t &a,ps_vector<char> &v)
-// {
-//   auto r=publish_hs_descr(sock,dir,a,v);
-//   if(r!=DESCR_OK) return r;
-  
-//   char bf[128];
-//   int httpcode=0;
-//   newliner_t nl;
-//   while(1) {
-//     int r=sock.read((unsigned char*)bf,127);
-//     if(r<0) {
-//       LOG_WARN("r<0\n");
-//       break;
-//     }
-//     if(r==0) break;
-//     nl.update((char*)bf,r);
-
-//     while((r=nl.read(bf,127))>0) {
-//       bf[r]=0;
-//       LOG_DEBUG("G %s",bf);
-//       if(strncmp(bf,"HTTP/",5)==0) {
-// 	auto c=cut(bf);
-// 	if(c.size()>1) httpcode=atoi(c[1].c_str());
-//       }
-//     }
-//   }
-
-//   LOG_INFO("publish_hs_descr got http code %d\n",httpcode);
-
-  
-//   if(httpcode!=200) {
-//     LOG_WARN("error got http code %d\n",httpcode);
-//     return DESCR_KO;
-//   }
-  
-//   return DESCR_OK;
-// }
 
 struct circuits_hsdirs_t : public circuits_t {
-#ifdef MEMDBG
+#ifdef MEMDBGSUB
   void * operator new(size_t size)
   {
-    void * p = malloc(size);
-    _mn[p]=size;
-    printf("**** circuits_hsdir_t::new %p size=%d\n",p,int(size));
+    void * p = malloc(size);//MEMDBG
+    printf("*** new circuits_hsdir_t %p size=%d\n",p,int(size));
     return p;
   }
     
   void operator delete(void * p)
   {
-    auto size=_mn[p];
-    printf("**** circuits_hsdir_t::delete %p size=%d\n",p,int(size));
-    memset(p,0x44,size);
-    _mn.erase(p);
-    //free(p);
+    printf("*** delete circuits_hsdir_t %p \n",p);
+    free(p);
   }
 #endif
 
+
   ps_vector<char> v;
   s_vc_t a;
-  set<int> okid;
-  map<int,int> mid;
   
   vector<unsigned short> ids;
 
-  circuits_hsdirs_t(const vector<unsigned short> &ids_,int tp):a(v) {
+  circuits_hsdirs_t(poller_t &poller,const vector<unsigned short> &ids_,int tp):circuits_t(poller),a(v) {
     ids=ids_;
     char tmp[100];
     snprintf(tmp,100,"hsdir tp=%d",tp);
-    name=tmp;
   }
 
   void publish() {
-    LOG_INFO("publish...\n");
+    LOG_INFOV("publish...\n");
     int k=0;
+    int n=ids.size();
+    ms.resize(n,NULL);
     for(auto &ii:ids) {
       auto ex=&(cache_descs[ii]);
-      mid[k]=ii;
-      async_gen_working_circuit(k++,ex);
+      async_gen_working_circuit(k,ex);
+      circuits[k]->orig=ii;
+      k++;
     }
+    assert(k==n);
   }
   
-  map<int,socket_tor_t *> ms;
+  vector<asocket_tor_t *> ms;
   
   virtual ~circuits_hsdirs_t() {
     LOG_INFOV("~circuits_hsdirs_t() %p\n",this);
     for(auto &it:ms) {
-      delete it.second;
+      if(it)
+	delete it;
     }
   }
   
@@ -3411,24 +3441,21 @@ struct circuits_hsdirs_t : public circuits_t {
     LOG_INFOVV("cb circuits_hsdirs_t id=%d t=%p l=%d tc=%p\n",id,t,l,tc);
     
     if(t==NULL) { //special
-      if(l==CB_RELAY_END) {//end of connection
-	LOG_INFOVV("cb circuits_hsdirs_t id=%d RELAY_END\n",id);
+      if(l==CCB_RELAY_END || l==CCB_DESTROY || l==CCB_STREAM_DESTROYED) {//end of connection
+	LOG_INFOVV("cb circuits_hsdirs_t id=%d cb=%d RELAY_END/DESTROY/STREAM_DSTROYED\n",id,int(l));
 
 	if(circuits[id]->status!=OK_JOB)
 	  circuits[id]->status=FAIL_JOB;
 	return;
       }
-      if(l==CB_RELAY_BEGIN) { //connected
+      if(l==CCB_RELAY_BEGIN) { //connected
 	m.lock();
-	auto it=ms.find(id);
-	assert(it!=ms.end());
-	socket_tor_t *s=it->second;
+	asocket_tor_t *s=ms[id];
 	publish_hs_descr(*s,*(s->get_exit_node()),a,v);
 	m.unlock();
 	return;
       }
-      ::LOG_FATAL("special not handled...\n");
-      assert(0);
+      LOG_FATAL("special %d not handed...\n",int(l));
     }
 
     LOG_INFOVV("cb circuits_hsdirs_t id=%d DATA len=%d \n",id,l);
@@ -3449,44 +3476,51 @@ struct circuits_hsdirs_t : public circuits_t {
       }
     }
 
-    LOG_INFO("publish_hs_descr got http code %d id=%d orig_id=%d\n",httpcode,id,mid[id]);
+    LOG_INFO("publish_hs_descr got http code %d id=%d orig_id=%d\n",httpcode,id,circuits[id]->orig);
 
+    
     if(httpcode!=200) {
       LOG_WARN("error got http code %d\n",httpcode);
       circuits[id]->status=FAIL_JOB;
     } else {
-      okid.insert(mid[id]);
       circuits[id]->status=OK_JOB;
     }
 
+    asocket_tor_t *s=ms[id];
+    ms[id]=NULL;
+    assert(s);
+    delete s;
   }
 
   mutex_t m;
 
-  virtual bool is_working() const {
-    for(auto &it:circuits)
-      if(it->status==WAIT || it->status==OK_CONNECTED) return 1;
-    return 0;
-  }
 
   virtual void done(int id,int ok) {
     if(ok==OK_CONNECTED) {
-      LOG_INFOVV("circuits to hsdirs done %d OK\n",id,ok);
+      LOG_INFOV("circuits to hsdirs id=%d done OK=%d\n",id,ok);
       auto tc=circuits[id]->tc;
 
       m.lock();
-      //int sid=tc->begin_dir(scb,circuits[id]);
-      int sid=tc->begin_dir(std::bind(&circuits_hsdirs_t::callback,this,id,std::placeholders::_1,std::placeholders::_2));
-
-      socket_tor_t *s=new socket_tor_t();
-      
-      assert(ms.find(id)==ms.end());
+      asocket_tor_t *s=new asocket_tor_t(tc);
+      assert(ms[id]==NULL);
       ms[id]=s;
+
+      int sid=tc->new_stream_id();
+      if(sid<=0)
+	LOG_WARN("sid=%d\n",sid);
+
       s->setup_dir(tc,sid);
+
+      int r=tc->begin_dir(std::bind(&circuits_hsdirs_t::callback,this,id,std::placeholders::_1,std::placeholders::_2),sid);
+      if(r!=sid)
+	LOG_WARN("something wrong in begin_dir(sid=%d) = %d\n",sid,r); 
       m.unlock();
     } else {
       LOG_WARN("circuits to hsdirs failed id=%d\n",id);
     }
   }
 };
+#endif
+
+#endif
 

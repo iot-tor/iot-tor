@@ -6,13 +6,10 @@
 using namespace std;
 
 #include "tor_defs.hpp"
-#include  <sys/poll.h>
 
+#include <sys/poll.h>
 
 #include "poll.hpp"
-
-poller_t poller;
-
 
 int dbg_cell=DBGBASE;
 
@@ -53,11 +50,8 @@ int expected_cell_size(int linkversion, bool circlen2, unsigned char *data,int l
   return 514;
 }
 
-struct sockcell_t;
-
 struct cell_t {
 protected:
-  virtual unsigned char *payload() =0;
 
   void log(const char *file,const char *fn,int line,int lvl, const char* format, ... )
   {
@@ -71,6 +65,7 @@ protected:
   }
 
 public:
+  virtual unsigned char *payload() =0;
 
   unsigned int circuit_id;
   unsigned short stream_id;
@@ -172,20 +167,18 @@ public:
       // random pad
       // Modified ! the padding for relay cells is done in the PrepareAsRelayCell method
     } else {
-      // May...?
       if(size<PAYLOAD_LEN)
 	memset(payload()+size,0,PAYLOAD_LEN-size);
       size=PAYLOAD_LEN;
     }
   }
 
-  void send_cell_nomt(socket_t &client) {
+  bool send_cell_nomt(asocket_t &client) {
     prepare_send_cell();
 
-    client.write(payload()-sh,sh+size);
+    int r=client.write(payload()-sh,sh+size);
+    return r==sh+size;
   }
-
-  void send_cell(sockcell_t &client);
 
   const char *command_str() const {
     return cell_command_str(command);
@@ -435,7 +428,7 @@ public:
   }
 
 
-  bool build_from_buffer(const unsigned char *buffer,int buffsize, const unsigned char& link_protocol_version_) {
+  int prepare(const unsigned char *buffer,int buffsize, const unsigned char& link_protocol_version_,bool withpayload=0) {
     if (link_protocol_version_ > 0)
       link_protocol_version = link_protocol_version_;
 		
@@ -443,7 +436,7 @@ public:
     clear_payload();
 		
     if(buffsize<5)
-      return false;
+      return -1;
 
     int z=0;
     if (link_protocol_version < 4) {
@@ -457,19 +450,23 @@ public:
     command = cell_command_t(buffer[z++]);
     
     if(isVariableLength() && (buffsize-z) < 2)
-      return false;
+      return -1;
 		
     if (isVariableLength()) {
       unsigned short len=toshort(buffer+z);
       z+=2;
       if((buffsize-z)<len)
-	return false;
+	return -1;
 
       assert(len<maxsize());
       
-      memcpy(payload(),buffer+z,len);
       size=len;
-      return true;
+
+      if(withpayload) {
+	memcpy(payload(),buffer+z,len);
+	return 0;
+      }
+      return z;
     } 
 
     //fixed size
@@ -477,12 +474,21 @@ public:
       return false;
     
     size=PAYLOAD_LEN;
-    memcpy(payload(),buffer+z,PAYLOAD_LEN);
-    
-    return true;
+    assert(z<16);
+    if(withpayload) {
+      memcpy(payload(),buffer+z,PAYLOAD_LEN);
+      return 0;
+    }
+    return z;
+  }
+
+  bool build_from_buffer(const unsigned char *buffer,int buffsize, const unsigned char& link_protocol_version_) {
+    int r=prepare(buffer,buffsize,link_protocol_version_,1);
+    return r==0;
   }
 
 
+  
   /*
     A RELAY cell PAYLOAD contains:
       Relay command           [1 byte]
@@ -591,7 +597,7 @@ public:
     put_int(payload()+5,digest4);
 
     if (calculated_digest != digest4) {
-      LOG_WARN("cell digest not match %08X != %08X\n", calculated_digest, digest4);
+      LOG_DEBUG("cell digest not match %08X != %08X\n", calculated_digest, digest4); //usually, it's not an error, the recognised field can be 0 sometime...
 
       return 0;
     }
@@ -609,7 +615,6 @@ public:
     s.decrypt(payload(),size);
   }
 
-
 };
 
 template<int ms> 
@@ -623,235 +628,235 @@ struct cell_t_t : public cell_t {
   cell_t_t(const unsigned char& link_protocol_version, const unsigned int& circid, const cell_command_t& command):cell_t(link_protocol_version,circid,command) {}
 
   ~cell_t_t() {}
-  
 };
 
-typedef cell_t_t<4096> cell_t_big;
+typedef cell_t_t<2048> cell_t_big;
 
 typedef cell_t_t<514> cell_t_small;
 
-
-enum cb_type_t {
+//enum for callback sockcell -> circuit
+enum mcb_type_t {
   MCBT_NONE,
   MCBT_DATA,
   MCBT_START,
+  MCBT_CONNECT,
   MCBT_END,
   MCBT_PING,
 };
 
-#ifdef MEMDBG
-  map<void*,string> _smb;
+
+
+struct new_sockcell_t : public asocket_tls_t {
+#ifdef DBGPOLL
+  string name;
 #endif
-  
 
-struct sockcell_t : public pollable_t {
-  //int mpass=0;
-  //int timelimit=3000;
-
-  socket_t *client=NULL;
-
-  virtual vector<int> getfds() {
-    vector<int> r;
-    int fd=getfd();
-    if(fd>=0)
-      r.push_back(fd);
-    return r;
+  void cb_timeout(int arg) {
+    cb_cell(NULL,MCBT_PING,arg);
   }
 
-  virtual void wcallback(pollable_cb_type_t cb, int arg) {
-    LOG_DEBUGV("sockcell  wcallback %d %d\n",int(cb),arg);
-    if(cb==CB_TIMEOUT) {
-      if(ncb)
-	ncb(NULL,MCBT_PING,arg);
-    }
-    if(cb==CB_POLLIN) {
-      auto c=read_cell(0);
-      if(c) {
-	assert(ncb);
-	ncb(c,MCBT_DATA,0);
+  void cb_pollin() {
+    if(0==(connected&STATUS_TLS_CONNECTED)) {
+      asocket_tls_t::cb_pollin();
+      if((connected&STATUS_ERROR)) {
+	cb_cell(NULL,MCBT_END,0);
+	return;
+      }
+      if((connected&STATUS_TLS_CONNECTED)) {
+	if(mbedtls_ssl_get_bytes_avail(&ssl)>0)
+	  LOG_SEVERE("mbedtls_ssl_get_bytes_avail(&ssl)>0 !\n");
+	  
+	cb_cell(NULL,MCBT_CONNECT,0);
       }
     }
-    if(cb==CB_BUF) {
+    if(connected&STATUS_TLS_CONNECTED) {
       auto c=read_cell(0);
       if(c) {
-	assert(ncb);
-	ncb(c,MCBT_DATA,0);
+	cb_cell(c,MCBT_DATA,0);
       }
+      while(mbedtls_ssl_get_bytes_avail(&ssl)>0) {
+	auto c=read_cell(0);
+	if(c) {
+	  cb_cell(c,MCBT_DATA,0);
+	}
+      }
+    }	
+  }
+
+  void cb_pollout() {
+    //LOG_INFO("here\n");
+    asocket_tls_t::cb_pollout();
+  }
+
+  virtual void pcallback(pollable_t **pc,poll_reg_t &r) {
+    //LOG_INFO("here\n");
+    if(r.events==POLL_POLLOUT) {
+      cb_pollout();
+
+
+      poll_reg_t r;
+
+      r.events=POLL_TIMEOUT|POLL_POLLIN;
+      r.fd=fd;
+      r.timeout=5000;
+#ifdef DBGPOLL
+      r.name=name;
+#endif
+      reg(r);
+
+    }
+    if(r.events==POLL_POLLIN) {
+      cb_pollin();
+    }
+    if(r.events==POLL_TIMEOUT) {
+      cb_timeout(r.timeout);
     }
   }
-  
-  
-  typedef std::function<void(cell_t *,cb_type_t,int)> callback_t;
-  callback_t ncb=NULL;
 
+  virtual void cb_cell(cell_t *,mcb_type_t,int)=0; //to be set in circuit_t
+  
+  cell_t_small smallcell;
+  
   rec_mutex_t mut_send;
 
-  cell_t *ct=NULL;
-  int exp=0;
-  int linkversion=0;
-  unsigned char *bf=NULL;
-  int wr=0;
+  unsigned char sbf[16];
+  cell_t *pc=NULL; //sanity check
+  short  exp=0;
+  short linkversion=0;
+  short wr=0;
+  short  wr2=0;
   
   bool firstcell=1;
   bool exiting=0;
-  bool th=0;
-
-  
-  bool data_in_buf() {
-    if(client) return client->data_in_buf();
-    return 0;
-  }
   
   void log(const char *file,const char *fn,int line,int lvl, const char* format, ... )
   {
-    if(lvl>dbg_cell) return;
+    if(lvl>dbg) return;
     va_list arglist;
     
-    printf("[%s][sockcell %p :: %s:%d] ",loglvlstr[lvl],this,fn,line);
+    printf("[%s][new_sockcell %p :: %s:%d] ",loglvlstr[lvl],this,fn,line);
     va_start( arglist, format );
     vprintf( format, arglist );
     va_end( arglist );
   }
 
-  
-private:
-  void delete_client() {
-    LOG_DEBUGVV("delete_client\n");
-    if (client != NULL) {
-      if (client->is_connected())
-	client->disconnect();
-      delete client;
-    }
-    client=NULL;
-  }
-public:
-  
-  void disconnect() {
-    LOG_DEBUGVV("disconnect()\n");
+  void disconnect_sockcell() {
+    LOG_DEBUGVV("disconnect\n");
     exiting=1;
-    if(th)
-      stop_thread();
+    disconnect_tls();
+  }
 
-    //client will not be used anymore (send or recieve)
-    delete_client();
-    //printf("end diconnect\n");
+  void disconnect() {
+    disconnect_sockcell();
   }
   
-  sockcell_t() {
-    client=NULL;
-    bf=new unsigned char[4096];
-  }
+  new_sockcell_t():smallcell(0, 0, cell_command_t::PADDING) {  }
 
-  ~sockcell_t() {
-    LOG_DEBUGVV("~sockcell_t");
-    disconnect();
-    delete [] bf;
-    //printf("~sockcell_t done\n");
-  }
-
-  void set_callback(callback_t cb=NULL) {
-    ncb=cb;
-  }
-
-private:
-  
-
-public:
-
-  int getfd() const {
-    if(client->is_connected())
-      return client->getfd();
-    return -1;
-  }
-  
-  void stop_thread() {
-    LOG_DEBUG("exit cell: deregister %p...\n",this);
-
-    poller.unreg(*this);
-
-    LOG_DEBUG("deregistered\n");
-    th=0;
-  }
-
-  void launch_th(const string &name="") {
-    static bool mth=0;
-    if(mth==0) {
-      mth=1;
-      poller.start_thread();
+  void delete_cell(cell_t *cell) {
+    LOG_DEBUG("delete this=%p %p\n",this,cell);
+    assert(pc==cell);
+    if(cell != &smallcell) {
+      void *ptr=cell;
+      cell->~cell_t();
+      big_free(ptr);
     }
-
-#ifdef MEMDBG
-    _smb[this]=name;
-#endif
-
-    LOG_DEBUG("insert in poll %p...\n",this);
-    th=1;
-    poller.reg(*this);
-    LOG_DEBUG("inserted in poll %p...\n",this);
+    pc=NULL;
   }
 
-  void send(cell_t *cell) {
+  virtual ~new_sockcell_t() {
+    LOG_DEBUGVV("~new_sockcell_t\n");
+    disconnect_sockcell();
+    if(pc)
+      delete_cell(pc);
+  }
+
+  
+
+  bool send(cell_t *cell) {
     mut_send.lock();
     if(exiting) {
+      LOG_DEBUG("send() fail because exiting\n");
       delete cell;
       mut_send.unlock();
-      return;
+      return 1;
     }
-    cell->send_cell_nomt(*client);
+    bool r=cell->send_cell_nomt(*this);
     delete cell;
     mut_send.unlock();
-    return;
+    return r;
   }
 
+  
+  
   cell_t *read_cell(bool wait=1) {
     LOG_DEBUG("read_cell p=%p w=%d\n",this,wait);
-    if(!client) {
-      LOG_INFOVV("read_cell: client=NULL\n");
-      return NULL;
-    }
-    assert(client);
     bool eof=0;
     
-    if(!(client->is_connected()))
+    if(!(is_connected()))
       LOG_INFOVV("read:cell wait=%d: client not connected\n",wait);
 
-    while(client->is_connected()) {
+    while(is_connected()) {
+      LOG_INFOVV("read:cell loop wait=%d: wr=%d exp=%p\n",wait,wr,exp);
+      
       if(exp<=0) {
 	assert(wr<9);
-	int a=client->read(bf+wr,9-wr);
+	int a=asocket_tls_t::read(sbf+wr,9-wr);
 	if(a==SOCK_TIMEOUT)
 	  break;
 	if(a<0) {
-	  LOG_INFOVV("read_cell a<0 !! close\n");
+	  LOG_INFOVV("read_cell a = %d <0 !! close\n",a);
 	  eof=1;
 	  break;
 	}
 	if(a==0) {
-	  //connection closed
+	  LOG_INFOVV("read_cell a = 0 closed\n");
 	  eof=1;
 	  break;
 	}
 	wr+=a;
-	exp=expected_cell_size((linkversion==0)?2:linkversion,linkversion==0,bf,wr); 
+	exp=expected_cell_size((linkversion==0)?2:linkversion,linkversion==0,sbf,wr); 
+
 	LOG_DEBUG("expected size: %d\n",exp);
+	if(exp>0) {
+	  assert(wr>0 && wr<16 && exp>wr);
+	  assert(pc==NULL);
+	  if(exp>514) {
+	    LOG_DEBUG("big cell size=%d\n",exp);
+	    // this cell is a CERT cell, only one in circuit live
+	    void* ptr=big_malloc(sizeof(cell_t_big));
+	    pc=new(ptr) cell_t_big(0, 0, cell_command_t::PADDING);
+	  } else pc=&smallcell;
+	  int z=pc->prepare(sbf,exp,(linkversion==0)?2:linkversion);
+	  assert(z>0);
+	  assert(z<=wr);
+	  memcpy(pc->payload(),sbf+z,wr-z);
+	  wr2=wr-z;
+	}
 	if(!wait) break;
 	continue;
       }
+
+      LOG_INFOVV("read:cell loop(2) wait=%d: wr=%d exp=%p\n",wait,wr,exp);
+
       assert(exp>10);
       assert(exp>wr);
-      int a=client->read(bf+wr,exp-wr);
+
+      assert(pc);
+      int a=asocket_tls_t::read(pc->payload()+wr2,exp-wr);
       if(a==SOCK_TIMEOUT)
 	break;
       if(a<0) {
-	LOG_INFOVV("read_cell a<0 (B): close\n");
+	LOG_INFOVV("read_cell (2) a = %d <0 !! close\n",a);
 	eof=1;
 	break;
       }
       if(a==0) {
+	LOG_INFOVV("read_cell(2) a = 0 closed\n");
 	eof=1;
 	break;
       }
       wr+=a;
+      wr2+=a;
 
       if(wr<exp) {
 	if(!wait) break;
@@ -859,34 +864,34 @@ public:
       }
       assert(wr==exp);
 
-      if(exp>514) ct=new cell_t_big(0, 0, cell_command_t::PADDING);
-      else ct=new cell_t_small(0, 0, cell_command_t::PADDING); 
-      assert(ct);
-      ct->build_from_buffer(bf,exp,(linkversion==0)?2:linkversion);
+      assert(pc);
 
       exp=-1;
       wr=0;
+      wr2=0;
 
       if(firstcell) {
-	if (ct->command != cell_command_t::VERSIONS) {
+	if (pc->command != cell_command_t::VERSIONS) {
 	  LOG_WARN("first cell is not a VERSIONS cell\n");
 	} else {
-	  linkversion=ct->GetLinkProtocolFromVersionCell();
+	  linkversion=pc->GetLinkProtocolFromVersionCell();
 	  LOG_INFOV("got first cell. version = %d\n",linkversion);
 	}
 	firstcell=0;
       }
 
-      return ct;
+      return pc;
     }
     if(eof) {
       LOG_INFOVV("disconnection in read_cell\n");
       exiting=1;
-      client->disconnect();
+      disconnect_sockcell();
+      cb_cell(NULL,MCBT_END,0);
     }
-    if(!client->is_connected()) {
+    if(!is_connected()) {
       LOG_INFOVV("client->isconnected() == false !\n");
       exiting=1;
+      cb_cell(NULL,MCBT_END,0);
     }
 
     return NULL;
@@ -894,12 +899,7 @@ public:
 
 };
 
-
-void cell_t::send_cell(sockcell_t &client) {
-  prepare_send_cell();
-  
-  client.send(this);
-}
+typedef new_sockcell_t sockcell_t;
 
 
 

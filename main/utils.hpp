@@ -1,6 +1,5 @@
 #pragma once
 
-
 #include <assert.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -69,6 +68,7 @@ using namespace std;
 #include <dirent.h>
 #include <stdarg.h>
 
+#include "memdebug.hpp"
 
 #define _LOG_FATAL 0
 #define _LOG_SEVERE 1
@@ -82,26 +82,37 @@ using namespace std;
 #define _LOG_DEBUGVV 9 
 
 
-map<void*,int> _mn; //DEBUG
-
 const char *loglvlstr[]={"FATAL","SEVERE","BUG","WARN","INFO","INFOV","INFOVV","DEBUG","DEBUGV","DEBUGVV"};
 
 #define LOG(lvl,...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,lvl,__VA_ARGS__)
 
-#define LOG_FATAL(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_FATAL,__VA_ARGS__)
+#define LOG_FATAL(...) {log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_FATAL,__VA_ARGS__);assert(0);}
+
 #define LOG_SEVERE(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_SEVERE,__VA_ARGS__)
 #define LOG_BUG(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_BUG,__VA_ARGS__)
 #define LOG_WARN(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_WARN,__VA_ARGS__)
 #define LOG_INFO(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_INFO,__VA_ARGS__)
+
+#ifdef VERBOSE
+
 #define LOG_INFOV(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_INFOV,__VA_ARGS__)
 #define LOG_INFOVV(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_INFOVV,__VA_ARGS__)
 #define LOG_DEBUG(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_DEBUG,__VA_ARGS__)
 #define LOG_DEBUGV(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_DEBUGV,__VA_ARGS__)
 #define LOG_DEBUGVV(...) log(__FILE__,__PRETTY_FUNCTION__,__LINE__,_LOG_DEBUGVV,__VA_ARGS__)
 
-int main_dbg=DBGBASE;
+#else
+void nothing() {}
+
+#define LOG_INFOV(...) nothing()
+#define LOG_INFOVV(...)  nothing()
+#define LOG_DEBUG(...) nothing()
+#define LOG_DEBUGV(...) nothing()
+#define LOG_DEBUGVV(...) nothing()
+#endif
 
 #define never_here() {LOG_FATAL("should never be here\n");assert(0);}
+
 
 void log(const char *file,const char *fn,int line,int lvl, const char* format, ... )
 {
@@ -122,14 +133,19 @@ string errno_str(int e) {
   return r;
 }
 
+#define GENERATE_ENUM(ENUM) ENUM,
+#define GENERATE_STRING(STRING) #STRING,
+
 /* debug things .... */
 
 #ifndef LINUX
 void esp_memory_info();
+std::string esp_heap_info(const std::string &endl);
 #endif
 
 void list_dir(const char* dir_prefix="/spiffs/")
 {
+#if 0
   DIR* dir = opendir(dir_prefix);
   if (dir) {
     while (true) {
@@ -154,6 +170,7 @@ void list_dir(const char* dir_prefix="/spiffs/")
   } else {
     printf("cannot opendir()\n");
   }
+#endif
 }
 
 void list_dirs(){
@@ -180,10 +197,8 @@ long long date_to_unix_time(int y,int m,int d,int h=0,int min=0,int s=0)
 }
 
 
-inline uint64_t timer_get_ms() { 
-#ifdef ESP
-    return (unsigned long) (esp_timer_get_time() / 1000ULL);
-#else
+#ifndef ESP
+inline uint64_t timer_get_ms_epoch() { 
     struct timespec spec;
 
     clock_gettime(CLOCK_REALTIME, &spec);
@@ -191,6 +206,17 @@ inline uint64_t timer_get_ms() {
     auto s  = spec.tv_sec;
     auto ms = spec.tv_nsec / 1000000; //ns to ms
     return s*1000+ms;
+}
+
+long long start_ms=timer_get_ms_epoch();;
+
+#endif
+
+inline uint64_t timer_get_ms() { 
+#ifdef ESP
+    return (unsigned long) (esp_timer_get_time() / 1000ULL);
+#else
+    return timer_get_ms_epoch()-start_ms;
 #endif
 }
 
@@ -376,11 +402,22 @@ struct rec_mutex_t {
 
 template<class C_t,int n>
 struct cvector_t {
-  C_t t[n];
+  //C_t t[n];
+  C_t *t=NULL;
   long long start=0;
   long long end=0;
   void clear() {
     start=end=0;
+  }
+
+  cvector_t() {
+    void *x=big_malloc(n*sizeof(C_t));
+    t=new(x) C_t[n];
+  }
+
+  ~cvector_t() {
+    big_free(t);
+
   }
 
   //void (*cb)(void*)=NULL;
@@ -392,18 +429,35 @@ struct cvector_t {
 
   void push_back(const C_t *a,int l)
   {
+    assert(l>0);
     auto e=end%n;
     end+=l;
     if((end-start)>n) {
-      printf("cvector overflow !!! \n");
-      printf("cvector push_back l=%d tt=%Ld n=%d\n",l,end-start,n);
-      assert(0);
+      LOG_FATAL("cvector overlow push_back l=%d tt=%Ld n=%d\n",l,end-start,n);
     }
     if(e+l>n) {
       memcpy(t+e,a,n-e);
       memcpy(t,a+n-e,l-(n-e));
     } else 
       memcpy(t+e,a,l);
+    //if(cb) cb(cbarg);
+  }
+
+  void push_front(const C_t *a,int l)
+  {
+    assert(l>0);
+    auto s=start%n;
+    s-=l;
+    start-=l;
+    
+    if((end-start)>n) {
+      LOG_FATAL("cvector overflow push_front l=%d tt=%Ld n=%d\n",l,end-start,n);
+    }
+    if(s<0) {
+      memcpy(t+n+s,a,-s);
+      memcpy(t,a-s,l+s);
+    } else 
+      memcpy(t+s,a,l);
     //if(cb) cb(cbarg);
   }
 
@@ -473,11 +527,24 @@ vector<string> cut(const string &s,const char *del="\t\r\n ") {
 
 bool is_ipv4_address(const string &a)
 {
+  int r=0;
+  int k=0;
   for(int i=0;a[i];i++) {
-    if(a[i]>='0' && a[i]<='9') continue;
-    if(a[i]=='.') continue;
+    if(a[i]>='0' && a[i]<='9') {
+      r=10*r+(a[i]-'0');
+      if(r>255) return 0;
+      continue;
+    }
+    if(a[i]=='.') {
+      if(r>255) return 0;
+      r=0;
+      k++;
+      continue;
+    }
     return 0;
   }
+  if(k!=3) return 0;
+  if(r>255) return 0;
   return 1;
 }
 
@@ -681,14 +748,32 @@ int hex_to_tab(const string &str, unsigned char *out,int maxlen ) {
 
 long long deltatime=0;
 
+bool time_is_set=0;
+
+list<void (*)()> list_cb_time_set;
+void cb_time_is_set() {
+  for(auto &it:list_cb_time_set) {
+    it();
+  }
+}
+
+void add_cb_time_is_set(void (*a)()) {
+  list_cb_time_set.push_back(a);
+}
+
 void set_unix_time(unsigned long long t) {
 #ifndef LINUX
 #ifndef USENTP
   unsigned long long tt=timer_get_ms()/1000;
   deltatime=t-tt;
   LOG_INFO("set deltatime to %d = (from cons) %d - (get_ms/1000) %d\n",int(deltatime),int(t),int(tt));
+
 #endif
 #endif
+
+  if(!time_is_set)
+    cb_time_is_set();
+  time_is_set=1;
 }
 
 unsigned long long get_unix_time() {
@@ -719,7 +804,12 @@ unsigned int time_period_from_time(long long ut,float *f=NULL) {
    after the epoch, at 2016-04-12 12:00 UTC, and ended at 16904*1440*60 +
   (12*60*60) seconds after the epoch, at 2016-04-13 12:00 UTC.
   */
+
+#ifdef FAKETP
+  unsigned int r=ut*30;
+#else
   unsigned int r=ut/60;
+#endif
   r-=12*60;
   if(f)
     (*f)=(r%1440)/1440.;
@@ -847,6 +937,15 @@ struct newliner_t {
     return r2;
   }
 
+  int left() const {
+    return r;
+  }
+
+  void print() {
+    bf[r]=0;
+    printf(">>%s<<\n",bf);
+  }
+
 };
 
 int dbg_certs=2;
@@ -901,10 +1000,10 @@ bool X509_verif(const vector<unsigned char> & x509PeerCertificate, const vector<
   unsigned int verification_flags;
 		
   if (mbedtls_x509_crt_verify_with_profile(chain, root_ca, NULL,  &profile, NULL, &verification_flags, NULL, NULL) != 0) {
-    char *tmp=new char[257];
+    char *tmp=(char*)big_malloc(257);
     mbedtls_x509_crt_verify_info(tmp, 256, "", verification_flags);
     if(dbg_certs>1) printf("X509_verif  failed because %s\n", tmp);
-    delete [] tmp;
+    big_free(tmp);
     goto  x509_validate_end;
   }
 
@@ -942,10 +1041,10 @@ bool CheckSignature_RSASHA256(const vector<unsigned char> & message, const vecto
   r=mbedtls_pk_verify(&(rsaIde->pk), MBEDTLS_MD_NONE, hash, 32, signature, sig_size);
   if(r) {
     if(dbg_certs>1) {
-      char *tmp=new char[129];
+      char *tmp=(char*)big_malloc(129);
       mbedtls_strerror(r,tmp, 128);
       printf("CheckSignature RSA/SHA256 signature INVALID: %s\n", tmp);
-      delete [] tmp;
+      big_free(tmp);
     }
     goto check_signature_end;
   } else ok=1;
@@ -1497,9 +1596,13 @@ struct onion_key_t {
   void print_info() const {
     ::print("sec  ",secret_key,64);
     ::print("pub  ",public_key,32);
-    printf("%s\n",get_ad().c_str());
+    printf("%s.onion\n",get_ad().c_str());
   }
-  
+
+  void print_host() const {
+    printf("%s.onion\n",get_ad().c_str());
+  }
+
   void generate(bool positive=1) // if positive, generate a key with a positive x public key
   {
     unsigned char tmp[32];
@@ -1672,10 +1775,13 @@ struct small_random_set_t {
     }
 
     random_shuffle(t,t+m);
+    // for(int i=0;i<m;i++)
+    //   printf("%d ",int(t[i]));
+    // printf("\n");
   }
   bool empty() const {return l==0;}
   int  pick() {
-    return t[l--];
+    return t[--l];
   }
 };
 
@@ -1739,3 +1845,66 @@ void my_miniz_def_free_func(void *opaque, void *address)
     //printf("(my_miniz_def_free_func %p)\n",address);
     big_free(address);
 }
+
+
+//keeper
+
+template<class k_t, int sz,int n=4>
+struct keeper_t {
+  int s=0;
+  k_t bb[n];
+  unsigned char ids[n][sz+1];
+  unsigned char tgt[sz+1];
+  void init(unsigned char *a) {
+    tgt[0]=0;
+    memcpy(tgt+1,a,sz);
+    s=0;
+    //memset(bb,0,sizeof(bb));
+    //print("tgt",tgt,sz+1);
+  }
+  
+  void insert(k_t &i,const unsigned char *a,int pos) {
+    if(pos==n) return;
+    //print("tgt ",tgt,sz+1);
+    //for(int i=0;i<s;i++)      print("    ",ids[i],sz+1);
+    if(pos<n-1) {
+      memmove(ids+pos+1,ids+pos,sizeof(ids[0])*(n-1-pos));
+    }
+    for(int u=n-1;u>pos;u--)
+      bb[u]=bb[u-1];
+    bb[pos]=i;
+    memcpy(ids[pos],a,sz+1);
+    s++;
+    //print(">>t ",tgt,sz+1);
+    //for(int i=0;i<s;i++)      print("    ",ids[i],sz+1);
+    if(s>n) s=n;
+  }
+
+  void add(k_t &i,const unsigned char *id) {
+    unsigned char a[sz+1];
+    a[0]=0;
+    memcpy(a+1,id,sz);
+    if(memcmp(a,tgt,sz+1)<0)
+      a[0]=1;
+    assert(memcmp(a,tgt,sz+1)>=0);
+    int u=s-1;
+    for(u=s-1;u>=0;u--) {
+      if(memcmp(a,ids[u],sz+1)>=0) {
+	break;
+      }
+    }
+    //printf("add %d at %d ",i,u+1);
+    //print("",a,sz+1);
+    insert(i,a,u+1);
+  }
+
+  void print() const {
+    ::print("keeper for ",tgt,sz+1);
+    for(int i=0;i<s;i++) {
+      printf("%d : id= %d ",i,bb[i]);
+      ::print("",ids[i],sz+1);
+      //if(sz==32) cache_descs[bb[i]].print_info();
+    }
+  }
+};
+

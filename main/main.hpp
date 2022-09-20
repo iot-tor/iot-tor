@@ -1,25 +1,35 @@
 #ifndef DBGBASE
 
-int dbgbase=9;
+int dbgbase=6;
+#define VERBOSE
 
 #define DBGBASE dbgbase
 #endif
 
 #include <stdio.h>
 #include <stdlib.h>
-#include "tor.hpp"
 
 #include "private.hpp"
 
+#include "tor.hpp"
+
+#include "circuit.hpp"
+
+
 void test(circuit_t *tc,string host,int port,int a);
 
-
+#ifndef NOHS
 #include "hs.hpp"
+#endif
 
 #include "test.hpp"
 
 #ifdef ESP
 #include "esp_wifi.hpp"
+#endif
+
+#ifdef SRDV
+#include "simplerdv.hpp"
 #endif
 
 void main_test(string type,string arg="")
@@ -35,6 +45,12 @@ void main_test(string type,string arg="")
   esp_init(); //init wifi, ntp spiffs
 #endif
 
+#ifdef SRDV
+  if(type=="srdv_s" || type=="srdv_c" ) {
+    simple_rdv_init();
+  }
+#endif
+
   tor_init();
 
 #ifdef LINUX
@@ -43,10 +59,12 @@ void main_test(string type,string arg="")
     while(1)
 #endif
       {
+#ifndef NOHS
 	if(type=="hs_s") {
 	  printf("==test HS_SERVER==\n");
-	  test_hs_server();
-	  exit(0);
+	  test_hs_server(arg);
+	  
+	  break;
 	}
 
 	if(type=="hs_c") {
@@ -54,6 +72,14 @@ void main_test(string type,string arg="")
 	  test_hs_client(arg);
 	  exit(0);
 	}
+#endif
+#ifdef SRDV
+	if(type=="srdv_s") {
+	  printf("==test simple rdv server==\n");
+	  simple_rdv_server();
+	  exit(0);
+	}
+#endif
 
 	if(type=="tor") {
 	  printf("==test TOR==\n");
@@ -75,6 +101,15 @@ void main_test(string type,string arg="")
       }
 
   reset();
+
+  printf("END main\n");
+
+  delete tor;
+
+  sleep(1);
+  
+  aff_mn();
+  
   
   return ;
 
@@ -85,11 +120,11 @@ void main_test(string type,string arg="")
   return;
   // testrdv();
 
+#if 0 
   printf("public ip:%s\n", get_public_ip_tls("ifconfig.me",443).c_str());
   printf("Tor ip:%s\n", get_tor_ip("ifconfig.me").c_str());
-
   printf("Tor ip by tls:%s\n", get_tor_ip_tls("ifconfig.me").c_str());
-
+#endif
   
   
   return;
